@@ -90,9 +90,9 @@ def _config_from_args(args: argparse.Namespace) -> Config:
     if args.profile:
         apply_preset(cfg, args.profile)
     mapping = {
-        "input": args.input,
+        "input": getattr(args, "input", None),
         "name": getattr(args, "name", None),
-        "chat": args.chat,
+        "chat": getattr(args, "chat", None),
         "threshold": args.threshold,
         "confirm": args.confirm,
         "cooldown": args.cooldown,
@@ -125,6 +125,8 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         "run_for": args.run_for,
         "verbose": args.verbose or None,
         "profiles": False if args.no_profile else None,
+        "console": getattr(args, "console", False) or None,
+        "open_browser": getattr(args, "open_browser", False) or None,
     }
     for key, value in mapping.items():
         if value is not None:
@@ -149,6 +151,27 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(BANNER)
     if not cfg.chat:
         print("  no chat source — audio-only triggers. Add --chat twitch:<channel>\n")
+    engine = Engine(cfg)
+    try:
+        return engine.run()
+    except KeyboardInterrupt:
+        engine.stop()
+        return 130
+    except SystemExit:
+        raise
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    """Console-only mode: no stream until a link is pasted into the page."""
+    from .engine import Engine
+
+    cfg = _config_from_args(args)
+    cfg.console = True
+    cfg.dashboard = True
+    if args.json:
+        print(json.dumps(cfg.as_dict(), indent=2))
+        return 0
+    print(BANNER)
     engine = Engine(cfg)
     try:
         return engine.run()
@@ -442,6 +465,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_multi.add_argument("--channel", action="append", metavar="NAME|INPUT|CHAT",
                          help="one channel, repeatable: 'kai|twitch.tv/kaicenat|twitch:kaicenat'")
     p_multi.set_defaults(func=cmd_multi)
+
+    p_dash = sub.add_parser("dashboard", aliases=["console"],
+                            help="open the console only; add stream links in the page")
+    _add_run_args(p_dash, include_source=False)
+    p_dash.add_argument("--open", action="store_true", dest="open_browser",
+                        help="open the console in your browser once it is listening")
+    p_dash.set_defaults(func=cmd_dashboard, console=True)
 
     p_frame = sub.add_parser("frame", help="grab a frame so you can line up --cam")
     p_frame.add_argument("-i", "--input", required=True, help="stream URL or file")

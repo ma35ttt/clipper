@@ -190,6 +190,8 @@ class Engine:
         self._force.set()
 
     def run(self) -> int:
+        if getattr(self.cfg, "console", False):
+            return self._run_console()
         self._prepare_dirs()
         self._maybe_load_profile()
         self._start_ingest()
@@ -203,6 +205,29 @@ class Engine:
                 self.dashboard = Dashboard(self, self.cfg.port, self.cfg.out_dir)
                 self.dashboard.start()
             self._loop()
+        finally:
+            self._shutdown()
+        return 0
+
+    def _run_console(self) -> int:
+        """Serve the console without an ingest; links start workers from the page.
+
+        The console still owns the tuning: edits are saved to its own profile and
+        copied into every worker it starts, so you can line up the settings first
+        and paste a link afterwards.
+        """
+        self._prepare_dirs()
+        self._maybe_load_profile()
+        self._chat_status = "off"
+        try:
+            self.dashboard = Dashboard(self, self.cfg.port, self.cfg.out_dir)
+            self.dashboard.start()
+            self.log("console ready — paste a Twitch or YouTube link to start clipping")
+            while not self._stop.is_set():
+                if self.cfg.run_for and time.monotonic() - self._started_at >= self.cfg.run_for:
+                    self.log("run duration reached")
+                    break
+                time.sleep(0.25)
         finally:
             self._shutdown()
         return 0
@@ -336,14 +361,18 @@ class Engine:
         keys = set(changed)
         if "cam" in keys:
             self._cam_setting = self.cfg.cam
-        if keys & {"verify", "verify_interval", "verify_window"}:
-            self._restart_verify()
-        if keys & {"cam", "cam_interval", "layout"}:
-            self._restart_cam_watch()
         if "encoder" in changed:
             from .util import pick_encoder
 
             self.cutter.encoder = pick_encoder(self.cfg.encoder)
+        if getattr(self.cfg, "console", False):
+            # The console has no ingest of its own; its values become the
+            # template for the next worker, so there is nothing to restart.
+            return
+        if keys & {"verify", "verify_interval", "verify_window"}:
+            self._restart_verify()
+        if keys & {"cam", "cam_interval", "layout"}:
+            self._restart_cam_watch()
 
     def save_profile(self) -> dict:
         ok = self._save_profile()
@@ -502,6 +531,8 @@ class Engine:
         explicit = str(getattr(self.cfg, "name", "") or "").strip()
         if explicit:
             return safe_name(explicit, 24)
+        if getattr(self.cfg, "console", False):
+            return "console"
         if self.cfg.chat:
             kind, value = parse_target(self.cfg.chat)
             if kind == "twitch" and value:
@@ -1008,6 +1039,7 @@ class Engine:
         return {
             "version": __version__,
             "channel": self.channel,
+            "console": bool(getattr(self.cfg, "console", False)),
             "layout": self.cfg.layout,
             "cam": self.cfg.cam,
             "caption_style": getattr(self.cfg, "subs_style", "pop"),

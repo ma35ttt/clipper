@@ -90,13 +90,15 @@ class Config:
     dashboard: bool = False
     port: int = 8756
     profiles: bool = True     # save/load per-streamer tuning at <work>/profiles
+    console: bool = False     # dashboard-only: no ingest until a link is added
+    open_browser: bool = False
 
     # --- misc -------------------------------------------------------------
     run_for: float = 0.0      # stop automatically after N seconds (0 = forever)
     verbose: bool = False
 
     def validate(self) -> None:
-        if not self.input:
+        if not self.input and not self.console:
             raise SystemExit("error: --input is required")
         if self.layout not in LAYOUTS:
             raise SystemExit(f"error: --layout must be one of {', '.join(LAYOUTS)}")

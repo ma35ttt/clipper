@@ -264,6 +264,12 @@ class StreamManager:
         values["cam"] = "auto"          # detect *this* streamer's webcam
         if values.get("title_mode") == "fixed":
             values["title_mode"] = "auto"   # a fixed hook belongs to the other stream
+        # A link pasted into an untouched console has no decoder vocabulary yet.
+        # Fill the streamer's proper nouns so the first clips already spell them.
+        if not values.get("subs_prompt"):
+            preset, _ = profile.autoconfigure(target.name, target.input)
+            if preset.get("subs_prompt"):
+                values["subs_prompt"] = preset["subs_prompt"]
         profile.save(profile.path_for(work_dir, target.name), values, target.name)
 
         port = free_port(self.engine.cfg.port + 1, 1)

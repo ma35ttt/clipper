@@ -119,6 +119,12 @@ PAGE = """<!doctype html>
               border: 1px solid var(--line2); box-shadow: none; }
   .btn.auto.on { background: linear-gradient(180deg, #46e6b8, var(--cool)); color: #06231b;
                  border: 0; box-shadow: 0 8px 24px rgba(56,224,176,.35); }
+  body.console .top { display: none; }
+  body.console #recbtn, body.console #clipbtn { display: none; }
+  body.console #streamsec {
+    border-color: rgba(106,168,255,.32);
+    box-shadow: 0 18px 50px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.06);
+  }
   main { max-width: 1280px; margin: 0 auto; padding: clamp(16px, 3vw, 34px);
          display: grid; gap: clamp(14px, 2vw, 22px); }
   .top { display: grid; grid-template-columns: 1.45fr 1fr; gap: clamp(14px, 2vw, 22px); }
@@ -583,7 +589,8 @@ function renderStreams(s) {
   if (sig === streamSig) return;
   streamSig = sig;
   const rows = [];
-  rows.push(`
+  if (!s.console) {
+    rows.push(`
     <div class="streamrow">
       <span class="dot ${s.connected ? '' : 'off'}"></span>
       <b>${esc(s.channel || 'this stream')}</b>
@@ -592,6 +599,10 @@ function renderStreams(s) {
       <span class="spacer"></span>
       <span class="smeta">${s.connected ? 'clipping' : 'offline'}</span>
     </div>`);
+  }
+  if (!list.length && s.console) {
+    rows.push('<div class="empty small">no streams yet — paste a link above to start clipping</div>');
+  }
   for (const st of list) {
     const live = st.status === 'live';
     const dead = st.status === 'failed' || st.status === 'stopped';
@@ -831,6 +842,7 @@ async function tick() {
     $('bgate').parentElement.classList.toggle('hot', need > 1 && have < need);
     $('vgate').textContent = have + '/' + need;
     $('chan').textContent = s.channel || '—';
+    document.body.classList.toggle('console', !!s.console);
     $('uptime').textContent = s.uptime_h || '0h 00m';
     $('clips').textContent = s.clips.length;
     $('count').textContent = s.clips.length
@@ -842,8 +854,8 @@ async function tick() {
     $('m-cam').textContent = 'cam ' + (s.cam || '—');
     $('m-style').textContent = 'subs ' + (s.caption_style || '—');
     $('m-enc').textContent = 'enc ' + (s.encoder || '—');
-    $('dot').style.background = s.connected ? 'var(--cool)' : 'var(--hot)';
-    $('conn').textContent = s.connected ? 'live' : 'offline';
+    $('dot').style.background = s.connected || s.console ? 'var(--cool)' : 'var(--hot)';
+    $('conn').textContent = s.console ? 'console' : (s.connected ? 'live' : 'offline');
     setAuto(!!s.auto);
     renderRec(s);
     renderStreams(s);
@@ -861,7 +873,12 @@ async function tick() {
 
 function renderWall(clips) {
   const wall = $('wall');
-  if (!clips.length) { wall.innerHTML = '<div class="empty">waiting for the first moment...</div>'; return; }
+  if (!clips.length) {
+    wall.innerHTML = document.body.classList.contains('console')
+      ? '<div class="empty">clips land in each streamer\\'s folder — open their console to watch</div>'
+      : '<div class="empty">waiting for the first moment...</div>';
+    return;
+  }
   wall.innerHTML = clips.map(c => `
     <div class="clip">
       <video src="/clips/${encodeURIComponent(c.file)}" controls preload="metadata" playsinline></video>
@@ -885,9 +902,15 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     resolveChoice('cancel');
   }
-  else if (k === 'r') { e.preventDefault(); toggleRec(); }
+  else if (k === 'r') {
+    if (document.body.classList.contains('console')) return;
+    e.preventDefault(); toggleRec();
+  }
   else if (k === 'a') { e.preventDefault(); toggleAuto(); }
-  else if (k === 'c') { e.preventDefault(); snap(); }
+  else if (k === 'c') {
+    if (document.body.classList.contains('console')) return;
+    e.preventDefault(); snap();
+  }
   else if (k === 's') { e.preventDefault(); profileAction('save'); }
 });
 
@@ -1112,7 +1135,15 @@ class Dashboard(threading.Thread):
         if self.port != wanted:
             self.engine.log(f"port {wanted} was busy — dashboard moved to {self.port}")
         self.httpd.daemon_threads = True
-        self.engine.log(f"dashboard → http://127.0.0.1:{self.port}")
+        url = f"http://127.0.0.1:{self.port}"
+        self.engine.log(f"dashboard → {url}")
+        if getattr(self.engine.cfg, "open_browser", False):
+            try:
+                import webbrowser
+
+                webbrowser.open(url + "/")
+            except Exception:  # noqa: BLE001 - a missing browser must not stop the console
+                pass
         self.httpd.serve_forever(poll_interval=0.5)
 
     def _ports_to_try(self) -> list[int]:

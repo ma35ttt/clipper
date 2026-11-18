@@ -69,7 +69,7 @@ def autoconfigure(channel: str = "", source: str = "") -> tuple[dict, str]:
 
     vocab = STREAMER_VOCAB.get(key)
     if not vocab:
-        bits = [name] if name and key not in ("stream", "live", "default") else []
+        bits = [name] if name and key not in ("stream", "live", "default", "console") else []
         if platform:
             bits.append(platform)
         vocab = ", ".join(bits)
@@ -85,7 +85,7 @@ def autoconfigure(channel: str = "", source: str = "") -> tuple[dict, str]:
         # YouTube has no chat source, so audio and keywords have to carry it.
         values.update({"w_chat": 0.0, "w_audio": 0.60, "w_text": 0.40})
 
-    label = name or "this stream"
+    label = "this console" if key == "console" else (name or "this stream")
     detail = "pop captions, best installed whisper model"
     if platform == "YouTube":
         detail += ", audio-led triggers"

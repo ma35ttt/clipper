@@ -36,6 +36,12 @@ python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc --layout blur
 open http://127.0.0.1:8756
 ```
 
+Or start with just the console and paste a link into it:
+
+```bash
+python3 -m clipper dashboard --open
+```
+
 Requirements: `ffmpeg` + `ffprobe` on `PATH` (with `libx264` and `aac`). Python 3.10+.
 Optional: `yt-dlp` or `streamlink` for resolving non-Twitch page URLs; `whisper.cpp`
 (`brew install whisper-cpp`) plus a model for subtitles; `imagemagick` for real-font
@@ -293,6 +299,16 @@ It binds loopback only, so it is private to the machine running it. Two people o
 different computers each get their own console on their own `8756` with no collision.
 If the default port is already taken on one machine, the second copy moves to the next
 free port (8757, 8758, ...) and says so in its log; `--port 9000` is respected exactly.
+
+You can open the console **without a stream** and add links later:
+
+```bash
+cd ~/clipper && python3 -m clipper dashboard --open
+```
+
+That mode hides the score card and clips from this console's own ingest (there is none),
+keeps the tuning and Auto configure, and copies those settings into each worker started
+from the page. The `dashboard` command also answers to `console`.
 
 Running two copies from the same checkout on one machine also means they share `.clipper`
 and `clips`, which would overwrite buffers and profiles. Give the second one its own

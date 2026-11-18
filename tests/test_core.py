@@ -607,6 +607,12 @@ class ConfigTest(unittest.TestCase):
     def test_profiles_are_on_by_default(self):
         self.assertTrue(Config().profiles)
 
+    def test_console_mode_needs_no_input(self):
+        with self.assertRaises(SystemExit):
+            Config().validate()
+        Config(console=True).validate()
+        self.assertTrue(Config(console=True).console)
+
 
 class ProfileTest(unittest.TestCase):
     def test_every_field_maps_to_a_config_attribute(self):
@@ -757,6 +763,14 @@ class ConsoleTest(unittest.TestCase):
         off = self.engine.apply_auto(False)
         self.assertFalse(off["auto"])
         self.assertEqual(self.cfg.cam, "1:2:3:4")
+
+    def test_console_engine_names_itself_and_skips_ingest(self):
+        cfg = Config(console=True, out_dir=self.cfg.out_dir,
+                     work_dir=self.cfg.work_dir)
+        engine = Engine(cfg)
+        self.assertEqual(engine.channel, "console")
+        self.assertEqual(engine.snapshot()["channel"], "console")
+        self.assertTrue(engine.snapshot()["console"])
 
     def test_auto_saves_cam_as_auto_not_the_detected_box(self):
         self.cfg.cam = "auto"
@@ -939,6 +953,22 @@ class StreamsTest(unittest.TestCase):
         self.assertEqual(saved["layout"], "split")
         self.assertEqual(saved["cam"], "auto")          # detect this streamer's face
         self.assertEqual(saved["title_mode"], "auto")   # no borrowed fixed hook
+        self.assertIn("Kai Cenat", saved["subs_prompt"])  # vocabulary for the new link
+
+    def test_console_workers_land_in_the_clips_root(self):
+        cfg = Config(console=True, out_dir=Path(self.tmp.name) / "clips",
+                     work_dir=Path(self.tmp.name) / "work")
+        engine = Engine(cfg)
+        engine._restart_verify = lambda: None
+        engine._restart_cam_watch = lambda: None
+        engine.streams = streams.StreamManager(engine, spawn=lambda cmd, log: _ProcStub())
+        result = engine.add_stream("https://twitch.tv/xQc")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(Path(result["stream"]["out_dir"]),
+                         Path(self.tmp.name) / "clips" / "xqc")
+        saved = profile.load(profile.path_for(
+            Path(self.tmp.name) / "work" / "streams" / "xqc", "xqc"))
+        self.assertIn("Juicer", saved["subs_prompt"])
 
     def test_adding_asks_before_running_two(self):
         self.engine._ingest = _ProcStub()  # the main stream is live
