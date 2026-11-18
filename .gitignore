@@ -1,0 +1,23 @@
+# scratch / generated
+.clipper/
+clips/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+
+# downloaded speech-to-text models (fetch with: clipper models --get medium.en)
+models/
+
+# demo media (regenerate with scripts/make_demo.py)
+demo/*.mp4
+demo/*.jsonl
+demo/*.jpg
+demo/*.png
+demo/*.wav

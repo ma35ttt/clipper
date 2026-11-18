@@ -1,0 +1,4 @@
+#!/bin/sh
+# Run clipper from anywhere: ./run doctor | ./run run -i URL -c twitch:name
+cd "$(dirname "$0")" || exit 1
+exec python3 -m clipper "$@"

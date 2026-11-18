@@ -1,0 +1,24 @@
+#!/bin/sh
+# Clip xQc live, tuned for his stream. Extra args are appended, e.g.:
+#   ./run-xqc --run-for 600 --no-dashboard
+cd "$(dirname "$0")" || exit 1
+exec python3 -m clipper run \
+  -i https://www.twitch.tv/xqc \
+  -c twitch:xqc \
+  --out clips/xqc \
+  --layout split \
+  --cam auto \
+  --threshold 0.58 \
+  --confirm 0.8 \
+  --cooldown 30 \
+  --pre 14 \
+  --post 10 \
+  --max-post 25 \
+  --chat-lag 4 \
+  --subs on \
+  --subs-style pop \
+  --subs-threads 4 \
+  --verify on \
+  --verify-interval 20 \
+  --subs-prompt "xQc, Juicer, Kick, Twitch, GTA, slots, ranked" \
+  "$@"
