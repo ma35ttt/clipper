@@ -427,12 +427,56 @@ def word_timings(cues: list[Cue], min_word: float = 0.12) -> list[Cue]:
     return out
 
 
+def _clip_to_speech(words: list[Cue], speech: list[Cue],
+                    duration: float | None = None) -> list[Cue]:
+    """Drop words that sit in a VAD silence, and trim a padded tail.
+
+    Timings are absolute, so removing a hallucinated word inside a pause does
+    not move the words after it. The clip is otherwise left alone: VAD only
+    reports pauses it is confident about.
+    """
+    if not speech:
+        return words
+    gaps = [(a.end, b.start) for a, b in zip(speech, speech[1:])
+            if b.start - a.end > 0.6]
+    limit = speech[-1].end + 0.75
+    if duration and duration > 0:
+        limit = min(limit, duration)
+    out: list[Cue] = []
+    for word in words:
+        if word.start > limit:
+            break
+        if any(start <= word.start and word.end <= end for start, end in gaps):
+            continue
+        out.append(Cue(word.start, min(word.end, limit), word.text))
+    return out
+
+
+def _shift_words(words: list[Cue], delta: float,
+                 duration: float | None = None) -> list[Cue]:
+    """Move word timings onto the real speech timeline and clamp to the clip."""
+    out: list[Cue] = []
+    for word in words:
+        start = max(0.0, word.start + delta)
+        end = max(start + WORD_MIN, word.end + delta)
+        if duration and duration > 0:
+            if start >= duration:
+                continue
+            end = min(end, duration)
+        out.append(Cue(start, end, word.text))
+    return out
+
+
 def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
-               min_seconds: float = 0.45) -> list[Cue]:
+               min_seconds: float = 0.45, max_gap: float = 0.32,
+               max_hold: float = 1.5) -> list[Cue]:
     """Group word timings into the short, fast chunks popping captions use.
 
     Consecutive words are packed up to ``max_words``/``max_chars`` and shown for
-    their combined span, then the next chunk replaces them. Chunks shorter than
+    their combined span, then the next chunk replaces them. A pause longer than
+    ``max_gap`` starts a new chunk, so captions vanish while nobody is talking
+    instead of sitting through the silence. A chunk never holds for more than
+    ``max_hold`` seconds after its last word began, and chunks shorter than
     ``min_seconds`` are folded into the previous one so nothing flickers for a
     couple of frames.
 
@@ -442,22 +486,31 @@ def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
     words = list(getattr(cues, "words", ()) or ())
     if not words:
         words = word_timings(cues)
+
+    def chunk_cue(group: list[Cue]) -> Cue:
+        start = group[0].start
+        # whisper's end offset can include the tail of a pause; cap the hold so a
+        # caption is not still on screen after the streamer stopped talking.
+        end = min(group[-1].end, group[-1].start + max_hold)
+        return Cue(start, max(end, start + WORD_MIN), " ".join(c.text for c in group))
+
     chunks: list[Cue] = []
     current: list[Cue] = []
     for word in words:
         trial = " ".join([c.text for c in current] + [word.text])
-        if current and (len(current) >= max_words or len(trial) > max_chars):
-            chunks.append(Cue(current[0].start, current[-1].end,
-                              " ".join(c.text for c in current)))
+        pause = word.start - current[-1].end if current else 0.0
+        if current and (len(current) >= max_words or len(trial) > max_chars
+                        or pause > max_gap):
+            chunks.append(chunk_cue(current))
             current = []
         current.append(word)
     if current:
-        chunks.append(Cue(current[0].start, current[-1].end,
-                          " ".join(c.text for c in current)))
+        chunks.append(chunk_cue(current))
 
     merged: list[Cue] = []
     for chunk in chunks:
-        if merged and (chunk.end - chunk.start) < min_seconds:
+        if merged and (chunk.end - chunk.start) < min_seconds \
+                and chunk.start - merged[-1].end <= max_gap:
             previous = merged[-1]
             combined = f"{previous.text} {chunk.text}"
             # Folding a stub into the previous chunk avoids a one-frame flash,
@@ -469,8 +522,8 @@ def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
         merged.append(chunk)
 
     # A stub that could not be folded (usually the last word of the clip) is
-    # held on screen for min_seconds instead of flashing for two frames. Running
-    # past the real clip end is harmless.
+    # held on screen for min_seconds instead of flashing for two frames, but
+    # never past the point where the next chunk starts or into dead air.
     shown: list[Cue] = []
     for index, chunk in enumerate(merged):
         end = chunk.end
@@ -485,14 +538,6 @@ def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
 # --------------------------------------------------------------------------- #
 # transcription
 # --------------------------------------------------------------------------- #
-
-def speech_score(words: list[Cue], duration: float | None) -> float:
-    """How much of the clip the trusted words actually cover, 0..1."""
-    if not words:
-        return 0.0
-    covered = sum(min(max(0.0, w.end - w.start), 1.5) for w in words)
-    return covered / max(duration or 0.0, 1.0)
-
 
 def trusted_chars(words: list[Cue]) -> int:
     return sum(len(w.text) for w in words)
@@ -527,20 +572,39 @@ def transcribe(wav: Path, model: str | None = None, language: str = "en",
         cues, words, note, has_tokens = _run_whisper_cpp(
             binary, chosen, wav, language, timeout, prompt, threads_n, duration)
 
-        # On music, a cutscene, or a mostly-silent moment the plain decode can
-        # invent a sentence instead of saying nothing. If what it produced is
-        # too sparse to be real speech, run the VAD pass as a rescue and keep
-        # whichever pass heard more. VAD is not the default because it also
-        # drops real lines when the game is louder than the streamer.
+        # Then the VAD pass. It costs one more decode but answers two questions
+        # the plain pass cannot: when speech actually starts (whisper stretches
+        # its timings across the whole window, captioning the pre-roll silence),
+        # and whether there is any speech at all (on music or a silent moment
+        # the plain pass invents a sentence). Songs and pure gameplay noise come
+        # back empty from VAD.
         vad = find_vad_model()
-        if vad is not None and has_tokens and not (
-                len(words) >= 3 and speech_score(words, duration) >= 0.35):
+        if vad is not None and has_tokens:
             vcues, vwords, vnote, vhas = _run_whisper_cpp(
                 binary, chosen, wav, language, timeout, prompt, threads_n,
                 duration, vad=vad, tag="_vad")
-            if speech_score(vwords, duration) >= 0.10 and \
-                    trusted_chars(vwords) > trusted_chars(words) * 1.25:
-                cues, words, note, has_tokens = vcues, vwords, vnote, vhas
+            if vhas:
+                if not vcues and not vwords:
+                    return Cues(), note + " · no speech (VAD)"
+                onset = vcues[0].start if vcues else (
+                    vwords[0].start if vwords else 0.0)
+                plain_onset = words[0].start if words else 0.0
+                shift = onset - plain_onset
+                if words and shift > 0.7:
+                    words = _shift_words(words, shift, duration)
+                    note += f" · speech starts {onset:.1f}s"
+                if words and vcues:
+                    # The VAD pass knows where speech actually is: drop words
+                    # that land in a silence between its segments (the plain
+                    # decode likes to fill those) and trim the padded tail.
+                    words = _clip_to_speech(words, vcues, duration)
+                # When the plain pass heard far less than VAD, its transcript is
+                # the weaker one. VAD's token offsets are unreliable, so time
+                # its words by their length inside the VAD segments instead.
+                if trusted_chars(vcues) > max(24, trusted_chars(cues) * 1.6):
+                    cues, words, note = vcues, word_timings(vcues), note + " · VAD text"
+                elif not words and vcues:
+                    cues, words, note = vcues, word_timings(vcues), note + " · VAD text"
     else:
         module = python_backend()
         if module:

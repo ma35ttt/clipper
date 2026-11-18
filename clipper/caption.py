@@ -135,13 +135,14 @@ def _png_size(path: Path) -> tuple[int, int]:
 
 def _label_png(binary: str, font: str, px: int, text: str, path: Path,
                stroke_px: int, fill: str = "white") -> bool:
-    """Render white text with a true *outside* black outline to ``path``.
+    """Render text with a true *outside* black outline to ``path``.
 
     ImageMagick centres a stroke on the glyph edge, so the usual
     ``-fill white -stroke black`` eats into the letters and a normal bold face
     comes out thin and hollow. Instead the alpha channel is dilated into a black
-    silhouette and the untouched white fill is composited on top. One process,
-    one image, and the letters keep their full weight.
+    silhouette and the untouched fill (white by default, gold for the hook) is
+    composited on top. One process, one image, and the letters keep their full
+    weight.
     """
     margin = stroke_px * 2 + 4
     result = run([
@@ -158,22 +159,26 @@ def _label_png(binary: str, font: str, px: int, text: str, path: Path,
 
 
 def render_styled(text: str, font_px: int, path: Path, max_width: int,
-                  max_lines: int = 2) -> tuple[int, int] | None:
-    """Bold white text with a thick black outline on a transparent PNG.
+                  max_lines: int = 2, font: str | None = None,
+                  fill: str = "white", char_width: float = 0.56) -> tuple[int, int] | None:
+    """Heavy text with a thick black outline on a transparent PNG.
 
-    Returns (width, height), or None when ImageMagick is unavailable or the
-    render failed, so the caller can fall back to the bitmap font.
+    ``font``/``fill`` let the hook use its own face and colour while the
+    subtitles stay white. Returns (width, height), or None when ImageMagick is
+    unavailable or the render failed, so the caller can fall back to the bitmap
+    font.
 
     Each line is rendered on its own and the lines are stacked centred: passing
     a multi-line ``label:`` together with ``-gravity`` makes ImageMagick drop
     the fill on the second line, which looks like hollow text.
     """
     binary = magick_binary()
-    font = styled_font()
+    font = font or styled_font()
     if not binary or not font or not text.strip():
         return None
-    # Arial Bold averages ~0.56em per character; aim just under max_width.
-    per_line = max(6, int(max_width / (font_px * 0.56)))
+    # Arial Bold averages ~0.56em per character; Arial Black ~0.72em. Aim just
+    # under max_width.
+    per_line = max(6, int(max_width / (font_px * char_width)))
     lines = [line for line in wrap(text, per_line, max_lines) if line.strip()]
     if not lines:
         return None
@@ -182,7 +187,7 @@ def render_styled(text: str, font_px: int, path: Path, max_width: int,
     try:
         for index, line in enumerate(lines):
             piece = path.with_name(f"{path.stem}_line{index}.png")
-            if not _label_png(binary, font, font_px, line, piece, stroke):
+            if not _label_png(binary, font, font_px, line, piece, stroke, fill):
                 return None
             pieces.append(piece)
 
@@ -323,6 +328,33 @@ def pop_font() -> str | None:
     if override and Path(override).exists():
         return override
     for cand in POP_FONT_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    return styled_font()
+
+
+# The hook is a title, not dialogue: give it a heavier face and a warm colour so
+# it reads as a caption about the clip instead of a line the streamer said.
+HOOK_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+    "/System/Library/Fonts/Supplemental/Impact.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "/Library/Fonts/Arial Black.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "C:/Windows/Fonts/ariblk.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+)
+
+HOOK_FILL = "#FFD23F"
+
+
+@lru_cache(maxsize=1)
+def hook_font() -> str | None:
+    override = os.environ.get("CLIPPER_HOOK_FONT")
+    if override and Path(override).exists():
+        return override
+    for cand in HOOK_FONT_CANDIDATES:
         if Path(cand).exists():
             return cand
     return styled_font()

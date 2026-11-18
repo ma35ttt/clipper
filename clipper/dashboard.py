@@ -306,7 +306,7 @@ PAGE = """<!doctype html>
   <span class="chip" id="chan">—</span>
   <span class="spacer"></span>
   <span class="chip" id="uptime">0h 00m</span>
-  <button class="btn auto" id="autobtn" onclick="toggleAuto()" title="Configure everything: 9:16 frame, webcam follow, synced captions, quoted hook (a)">★ AUTO</button>
+  <button class="btn auto" id="autobtn" onclick="toggleAuto()" title="Configure everything: 9:16 frame, webcam follow, synced captions, smart hook (a)">★ AUTO</button>
   <button class="btn rec" id="recbtn" onclick="toggleRec()" title="Start / stop a manual recording (r)">● REC</button>
   <button class="btn" id="clipbtn" onclick="snap()" title="Force a clip at this moment (c)">CLIP NOW</button>
 </header>

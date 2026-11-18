@@ -22,7 +22,8 @@ from clipper import streams  # noqa: E402
 from clipper import transcribe  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
-from clipper.cutter import Cutter, hook_from_cues, split_graph  # noqa: E402
+from clipper.cutter import (Cutter, hook_from_chat, hook_from_cues,  # noqa: E402
+                            pick_title, split_geometry, split_graph)
 from clipper.engine import Engine  # noqa: E402
 from clipper.hls import HLSBuffer, parse_playlist  # noqa: E402
 from clipper.hls import Segment  # noqa: E402
@@ -323,6 +324,20 @@ class PopChunkTest(unittest.TestCase):
         chunks = transcribe.pop_chunks(transcribe.Cues([], words))
         self.assertGreaterEqual(chunks[-1].end - chunks[-1].start, 0.45)
 
+    def test_a_pause_starts_a_new_chunk_and_leaves_a_gap(self):
+        words = [transcribe.Cue(0.0, 0.6, "BRO"),
+                 transcribe.Cue(0.6, 1.2, "LOOK"),
+                 transcribe.Cue(3.4, 4.0, "MAP")]
+        chunks = transcribe.pop_chunks(transcribe.Cues([], words))
+        self.assertEqual([c.text for c in chunks], ["BRO LOOK", "MAP"])
+        self.assertGreater(chunks[1].start - chunks[0].end, 1.0)
+
+    def test_a_long_word_does_not_hold_the_caption(self):
+        words = [transcribe.Cue(0.0, 0.4, "WAIT"),
+                 transcribe.Cue(0.4, 2.4, "WHAT")]
+        chunks = transcribe.pop_chunks(transcribe.Cues([], words))
+        self.assertLessEqual(chunks[-1].end - chunks[-1].start, 2.0)
+
     def test_cues_behave_like_a_plain_list(self):
         cues = transcribe.Cues([transcribe.Cue(0.0, 1.0, "HI")],
                                [transcribe.Cue(0.0, 0.4, "HI")])
@@ -417,6 +432,24 @@ class TranscribeTest(unittest.TestCase):
         short = [transcribe.Cue(1.0, 3.0, "clip it")]
         self.assertEqual(transcribe.resegment(short), short)
 
+    def test_words_shift_onto_the_speech_onset_and_clamp(self):
+        words = [transcribe.Cue(0.0, 1.0, "BRO"),
+                 transcribe.Cue(1.0, 2.0, "HI")]
+        shifted = transcribe._shift_words(words, 6.3, 8.0)
+        self.assertAlmostEqual(shifted[0].start, 6.3)
+        self.assertAlmostEqual(shifted[-1].end, 8.0)
+        self.assertEqual(transcribe._shift_words(words, 20.0, 8.0), [])
+
+    def test_words_inside_a_vad_silence_are_dropped(self):
+        speech = [transcribe.Cue(0.0, 2.0, "a"),
+                  transcribe.Cue(5.0, 8.0, "b")]
+        words = [transcribe.Cue(0.2, 1.0, "keep"),
+                 transcribe.Cue(2.5, 4.0, "drop"),
+                 transcribe.Cue(5.2, 6.0, "keep2"),
+                 transcribe.Cue(9.0, 9.5, "tail")]
+        kept = transcribe._clip_to_speech(words, speech, 10.0)
+        self.assertEqual([w.text for w in kept], ["keep", "keep2"])
+
     def test_status_never_raises(self):
         ready, detail = transcribe.status()
         self.assertIsInstance(ready, bool)
@@ -463,9 +496,31 @@ class SplitLayoutTest(unittest.TestCase):
         self.assertIn("crop=367:294:0:539", graph)
         self.assertIn("vstack=inputs=2", graph)
         # the three bands must add up to a full 1080x1920 frame
-        self.assertIn("scale=1080:760", graph)
-        self.assertIn("scale=1080:608", graph)
-        self.assertIn("scale=1080:552", graph)
+        geo = split_geometry("0:539:367:294")
+        self.assertEqual(geo.cam_h + geo.game_h + geo.bot_h, 1920)
+        self.assertIn(f"scale=1080:{geo.cam_h}", graph)
+        self.assertIn(f"scale=1080:{geo.game_h}", graph)
+        self.assertIn(f"scale=1080:{geo.bot_h}", graph)
+
+    def test_the_game_is_cropped_away_from_a_side_webcam(self):
+        # Jason: webcam bottom-right. The crop keeps the 1504 px on its left.
+        geo = split_geometry("1504:550:294:266", 1920, 1080)
+        self.assertIsNotNone(geo.crop)
+        x, y, w, h = geo.crop
+        self.assertEqual((x, y), (0, 0))
+        self.assertLessEqual(x + w, 1504)
+        self.assertGreater(w, 1920 * 0.7)
+        self.assertGreater(geo.game_h, 700)      # bigger than the old 608 band
+        self.assertGreaterEqual(geo.bot_h, 400)  # still room for two captions
+        graph = ";".join(split_graph("1504:550:294:266", 1920, 1080))
+        self.assertNotIn("patchblur", graph)     # no blurred duplicate face
+        self.assertIn(f"crop={w}:{h}:0:0", graph)
+
+    def test_a_centred_webcam_falls_back_to_blurring_the_inset(self):
+        geo = split_geometry("760:400:400:300", 1920, 1080)
+        self.assertIsNone(geo.crop)
+        self.assertEqual(geo.game_h, 608)
+        self.assertIn("patchblur", ";".join(split_graph("760:400:400:300")))
 
     def test_hook_quotes_the_clip_not_chat(self):
         cues = [transcribe.Cue(0, 2, "no way dude"),
@@ -476,6 +531,27 @@ class SplitLayoutTest(unittest.TestCase):
     def test_hook_prefers_the_strongest_phrase(self):
         cues = [transcribe.Cue(0, 2, "oh my god what is happening")]
         self.assertEqual(hook_from_cues(cues), "WHAT IS HAPPENING")
+
+    def test_chat_consensus_becomes_the_hook(self):
+        chat = [
+            {"user": "a", "text": "LOOK AT THE MAP U BLIND"},
+            {"user": "b", "text": "look at the map"},
+            {"user": "c", "text": "LOOK AT THE MAP"},
+            {"user": "d", "text": "lol"},
+        ]
+        self.assertEqual(hook_from_chat(chat), "LOOK AT THE MAP")
+        self.assertEqual(pick_title(Config(), {}, [], chat),
+                         "CHAT SAYS LOOK AT THE MAP")
+
+    def test_one_loud_user_cannot_invent_a_chat_hook(self):
+        chat = [{"user": "a", "text": "LOOK AT THE MAP"}] * 6
+        self.assertEqual(hook_from_chat(chat), "")
+        self.assertEqual(hook_from_chat([{"user": "a", "text": "LOL"},
+                                         {"user": "b", "text": "LOL"}]), "")
+
+    def test_a_short_question_is_the_last_resort_hook(self):
+        cues = [transcribe.Cue(0, 1.5, "Where is my Tia?")]
+        self.assertEqual(pick_title(Config(), {}, cues, []), "WHERE IS MY TIA?")
 
 
 class CameraTest(unittest.TestCase):

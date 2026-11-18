@@ -127,7 +127,7 @@ Presets: `--profile sensitive | default | conservative`.
 --cam 0:539:367:294   # or pin the webcam box x:y:w:h by hand (split only)
 --subs-style pop      # popping word-chunks on a pill (default)
 --subs-style block    # calmer multi-line subtitle block
---title-mode auto     # hook caption quoted from the clip's own transcript
+--title-mode auto     # smart hook: repeated chat phrase, else a line from the clip
 --title-mode fixed --title "HE COOKED"
 --title-mode none
 ```
@@ -135,9 +135,14 @@ Presets: `--profile sensitive | default | conservative`.
 ### The `split` layout
 
 `split` stacks three bands into a 1080x1920 frame: the streamer's webcam cropped out of
-the source across the top, the untouched 16:9 frame underneath, and a softly blurred band
-below that which carries the burned subtitles and the hook. The small copy of the webcam
-baked into the gameplay is blurred away so his face does not appear twice.
+the source across the top, the gameplay underneath, and a softly blurred band below that
+carries the burned subtitles and the hook. The gameplay is **cropped away from the webcam
+side** rather than shown whole: his face is already across the top, so the inset is dead
+pixels, and the narrower crop makes the game fill more of the frame instead of sitting in a
+letterboxed strip. The game band grows from 608 to roughly 780 px tall for a bottom-right
+camera, and the caption band shrinks to match. If the webcam floats in the middle of the
+frame (no clean side to cut), clipper keeps the full frame and blurs the duplicate inset
+instead.
 
 **The webcam is found automatically.** `--cam auto` is the default: clipper samples a
 dozen frames of the stream and runs face detection on each, then keeps the face that
@@ -156,13 +161,22 @@ clipper falls back to the measured xQc box `0:539:367:294`.
 
 ### Hook captions
 
-With `--title-mode auto` the hook is a short phrase lifted from the clip's own transcript —
-`"NO WAY"`, `"WHAT IS HAPPENING"`, `"OH MY GOD"` — rather than a generic label. It says what
-is unique about *this* clip instead of commenting on chat. When nothing quotable was said the
-clip simply gets no hook, which beats a caption that means nothing.
+With `--title-mode auto` the hook is chosen from what the clip is actually about. First it
+looks for a phrase **chat keeps repeating** in the clip window — "LOOK AT THE MAP" from
+three different people becomes `CHAT SAYS LOOK AT THE MAP`. Requiring at least two messages
+from two different users stops one loud person from inventing a hook, and generic chatter
+(`LOL`, `W`, `KEKW`, one-word reactions) is ignored. If chat has no consensus, it falls back
+to a quotable line from the transcript (`"NO WAY"`, `"WHAT IS HAPPENING"`), then to a short
+genuine question. When none of those exist the clip simply gets no hook, which beats a
+caption that means nothing.
 
-Because the hook quotes the transcript, `auto` needs subtitles enabled to have something to
-quote; `--title-mode fixed` always works.
+The hook is deliberately **not styled like the subtitles**: it uses a heavier title face
+(Arial Black when installed), gold `#FFD23F` fill with a black outline, and sits between the
+gameplay and the white subtitle band. Subtitles stay white Arial Bold. Override the hook
+face with `$CLIPPER_HOOK_FONT` if you want a different one.
+
+`auto` needs subtitles or chat to have something to work from; `--title-mode fixed` always
+works.
 
 Captions use `drawtext` when your ffmpeg was built with freetype; otherwise clipper
 rasterises a bold bitmap caption to a PNG with the stdlib and overlays it, and prefers
@@ -176,7 +190,7 @@ skipped when it is not.
 
 ```bash
 python3 -m clipper models --get medium.en  # one-off ~1.5GB whisper.cpp model (best)
-python3 -m clipper models --get vad        # ~0.9MB VAD model for the rescue pass
+python3 -m clipper models --get vad        # ~0.9MB VAD model: speech timing + no-fake-text gate
 python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc --layout blur
 
 --subs auto          # default: on if a model is found, else off
@@ -218,13 +232,21 @@ Accuracy matters more than latency here, and clipper leans that way:
 - **Word-level sync for popping captions.** Alongside the segments, clipper reads
   whisper's per-token offsets (`-ojf`), merges tokens back into words ("`it`" + "`'s`"
   → `it's`), and drives each popping chunk off the real spoken timing rather than a
-  length estimate.
-- **A VAD rescue pass, not a default.** On music, cutscenes or near-silence the plain
-  decode can hallucinate a whole sentence. When what it produced is too sparse to be
-  real speech (<3 trusted words, or less than 35% coverage), clipper re-runs whisper with
-  the Silero VAD (`--vad`, model auto-downloaded by `clipper models --get vad`) and keeps
-  that result only when it heard meaningfully more. VAD is not the default because it
-  also drops real lines when the game is louder than the streamer.
+  length estimate. A pause longer than 0.32 s starts a new chunk, so captions disappear
+  while nobody is talking instead of sitting through the silence.
+- **A Voice Activity Detection pass on every clip** (when the VAD model is installed). After
+  the plain decode, clipper runs whisper again with the Silero VAD (`--vad`, model fetched by
+  `clipper models --get vad`). It costs one extra fast decode and fixes the two ways captions
+  look fake:
+  - **Wrong start.** whisper stretches its timings across the whole window, so a clip with
+    six seconds of pre-roll gets captions from frame one. VAD reports where speech really
+    starts; clipper shifts the word timings onto that onset. The JasonTheWeen test clip now
+    starts captioning at 6.3 s instead of 0.0 s.
+  - **Speech that never happened.** On music, cutscenes or a silent moment VAD comes back
+    empty, and clipper then burns **no subtitles at all** rather than the sentence the plain
+    decode invented. Words that land inside a VAD silence are dropped too.
+  When the plain pass misses far more speech than VAD heard, clipper uses VAD's transcript
+  and estimates word timings inside its segments.
 - **`--subs-prompt` biases the decoder** toward a streamer's name, game and recurring
   slang. Keep it short and noun-heavy — long phrase lists get echoed back on noisy audio.
   **Auto configure** fills this in per streamer.
@@ -328,7 +350,7 @@ Everything you would otherwise pass as a flag is controllable from the page:
   can never drift apart. Changes apply as you edit; a few (chat connection, `--verify`
   model) restart their worker on the spot.
 - **AUTO** — one button that configures the lot: 9:16 `split` frame, automatic webcam
-  follow, synced popping captions, the hook quoted from the clip's own words, and a
+  follow, synced popping captions, a smart hook from chat or the clip's own words, and a
   tuned trigger. Press it again and your previous settings come straight back. Keyboard
   `a`.
 - **Auto configure** (on the tuning panel) — a one-shot preset for the current streamer:
@@ -366,7 +388,7 @@ second stream alongside the first; **Keep current only** leaves things untouched
 Each stream adds a live ingest plus a caption/render pipeline, so two is comfortable
 and three is about the ceiling on a laptop. Added workers inherit the console's
 current tuning, with webcam detection forced back to `auto` (so each streamer's own
-face is found) and any fixed hook text dropped (so the hook is quoted from each clip).
+face is found) and any fixed hook text dropped (so each clip gets its own smart hook).
 Tune any of them independently on its own console.
 
 **stop** frees the machine and leaves its clips on disk. **retry** restarts a worker

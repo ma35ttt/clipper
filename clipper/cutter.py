@@ -54,12 +54,105 @@ def hook_from_cues(cues) -> str:
     return best.upper() if best else ""
 
 
-def pick_title(cfg: Config, signals: dict, cues=()) -> str:
+# Chat repeats the thing the clip is actually about ("LOOK AT THE MAP" three
+# times from three people). Those repeats make a far better hook than a generic
+# "NO WAY", and they are still grounded in this clip. Very short messages are
+# noise: emoji, "W", "LOL", one-word reactions.
+CHAT_STOPWORDS = {
+    "A", "AN", "THE", "U", "UR", "YOU", "IS", "ARE", "WAS", "WERE", "AM", "BE",
+    "AT", "ON", "IN", "OF", "TO", "IT", "AND", "OR", "FOR", "THIS", "THAT",
+    "MY", "ME", "HE", "SHE", "HIS", "HER", "SO", "JUST", "DO", "DONT", "NOT",
+    "WITH", "AS", "IF", "BUT", "NOW", "WHY", "HOW", "WHAT", "WHO",
+}
+CHAT_NOISE = {
+    "LOL", "LMAO", "LMFAO", "KEKW", "KEK", "POG", "POGGERS", "W", "L", "F",
+    "OMG", "WTF", "WTH", "GG", "EZ", "CLIP", "CLIP IT", "OMEGALUL", "LUL",
+    "TRUE", "REAL", "FAX", "BASED", "SUS", "COPE", "MALD", "RATIO",
+}
+CHAT_PROFANITY = {
+    "FUCK", "FUCKING", "FUCKED", "SHIT", "BITCH", "CUNT", "NIGGA", "NIGGER",
+    "RETARD", "RETARDED", "SPED", "DICK", "PUSSY", "ASS", "ASSHOLE",
+}
+
+
+def _chat_text(message) -> tuple[str, str]:
+    if isinstance(message, dict):
+        return str(message.get("text") or ""), str(message.get("user") or "")
+    return str(message or ""), ""
+
+
+def _bad_phrase(phrase: str) -> bool:
+    words = phrase.split()
+    if len(phrase) < 6 or len(words) < 2:
+        return True
+    if any(word in CHAT_PROFANITY for word in words):
+        return True
+    if phrase in CHAT_NOISE:
+        return True
+    return all(word in CHAT_STOPWORDS for word in words)
+
+
+def hook_from_chat(chat) -> str:
+    """The phrase chat keeps repeating in this clip, or "" when there is none.
+
+    Counts 2-4 word n-grams across messages and needs at least two messages from
+    two different users, so one loud person cannot invent a hook. Returns an
+    uppercase phrase without the "chat says" framing.
+    """
+    from collections import Counter, defaultdict
+
+    counts: Counter[str] = Counter()
+    users: defaultdict[str, set[str]] = defaultdict(set)
+    for index, message in enumerate(chat or ()):
+        text, user = _chat_text(message)
+        text = re.sub(r"[^A-Za-z0-9' ]+", " ", text.upper())
+        words = re.sub(r"\s+", " ", text).strip().split()
+        if not 2 <= len(words) <= 7:
+            continue
+        who = user or f"#{index}"
+        for size in (4, 3, 2):
+            for start in range(len(words) - size + 1):
+                phrase = " ".join(words[start:start + size])
+                if _bad_phrase(phrase):
+                    continue
+                counts[phrase] += 1
+                users[phrase].add(who)
+
+    best, best_score = "", 0.0
+    for phrase, count in counts.items():
+        people = len(users[phrase])
+        if count < 2 or people < 2:
+            continue
+        # Favour the phrase with the most agreement, then the longer phrasing:
+        # "LOOK AT THE MAP" beats the "LOOK AT" it contains.
+        score = count * people + len(phrase) / 1000.0
+        if score > best_score or (score == best_score and len(phrase) > len(best)):
+            best, best_score = phrase, score
+    return best
+
+
+def hook_question(cues) -> str:
+    """A short genuine question from the clip, as a last-resort hook."""
+    for cue in cues or ():
+        text = re.sub(r"\s+", " ", str(cue.text)).strip()
+        words = text.split()
+        if "?" in text and 3 <= len(words) <= 8 and len(text) <= 38:
+            return text.upper()
+    return ""
+
+
+def pick_title(cfg: Config, signals: dict, cues=(), chat=()) -> str:
     if cfg.title_mode == "none":
         return ""
     if cfg.title_mode == "fixed":
         return cfg.title or ""
-    return hook_from_cues(cues)
+    repeated = hook_from_chat(chat)
+    if repeated:
+        return f"CHAT SAYS {repeated}"
+    quote = hook_from_cues(cues)
+    if quote:
+        return quote
+    return hook_question(cues)
 
 
 def _wrap(text: str, width: int = 20) -> str:
@@ -76,13 +169,66 @@ def _wrap(text: str, width: int = 20) -> str:
 
 
 # -- `--layout split` geometry, on a 1080x1920 frame -------------------------
-SPLIT_CAM_H = 760     # camera band across the top
+SPLIT_CAM_H = 760     # camera band across the top (when the game cannot be cropped)
 SPLIT_GAME_H = 608    # 16:9 gameplay at 1080 wide
-SPLIT_BOT_H = 1920 - SPLIT_CAM_H - SPLIT_GAME_H   # 552, where captions live
+SPLIT_BOT_MIN = 440   # space kept below the game for the hook and subtitles
 
 # Candidate verification runs while the loop is live, so it gets fewer threads
 # than subtitle transcription — it just needs to be quick, not perfect.
 VERIFY_THREADS = 2
+
+
+def _even(value: float) -> int:
+    return max(2, int(round(value)) - int(round(value)) % 2)
+
+
+@dataclass(frozen=True)
+class SplitGeometry:
+    cam_h: int
+    game_h: int
+    bot_h: int
+    # (x, y, w, h) of the gameplay crop in source pixels, or None to keep the
+    # whole frame and blur the webcam inset instead.
+    crop: tuple[int, int, int, int] | None = None
+
+
+def split_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
+                   src_h: int = 1080) -> SplitGeometry:
+    """Work out the three bands, cropping the game away from the webcam side.
+
+    Streamers park the webcam inset in a corner of the 16:9 frame. When that
+    corner is anchored to the left or right edge, the gameplay is cropped to the
+    rest of the width: his face is already across the top, so the inset is dead
+    pixels, and the narrower crop makes the game fill more of the vertical
+    frame. If the inset floats in the middle, the frame is kept whole and the
+    inset is blurred out (the old behaviour).
+    """
+    x, y, w, h = parse_cam(cam)
+    src_w = int(src_w or 1920)
+    src_h = int(src_h or 1080)
+    pad = 10
+    crop: tuple[int, int, int, int] | None = None
+
+    if x >= src_w * 0.6:
+        # Webcam on the right: keep everything to the left of it.
+        width = _even(max(src_w * 0.55, x - pad))
+        if width >= src_w * 0.55:
+            crop = (0, 0, width, src_h)
+    elif x + w <= src_w * 0.4:
+        # Webcam on the left: keep everything to the right of it.
+        left = _even(min(x + w + pad, src_w * 0.45))
+        if src_w - left >= src_w * 0.55:
+            crop = (left, 0, _even(src_w - left), src_h)
+
+    if crop:
+        cw, ch = crop[2], crop[3]
+        game_h = max(540, min(960, _even(1080 * ch / cw)))
+        cam_h = max(480, min(720, 1920 - game_h - SPLIT_BOT_MIN))
+        bot_h = 1920 - cam_h - game_h
+        return SplitGeometry(cam_h, game_h, bot_h, crop)
+
+    return SplitGeometry(SPLIT_CAM_H, SPLIT_GAME_H,
+                         1920 - SPLIT_CAM_H - SPLIT_GAME_H, None)
 
 
 def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
@@ -90,45 +236,59 @@ def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
     """Filter parts for cam-on-top / gameplay-middle / captions-below.
 
     The webcam inset is cropped out of the source and shown across the top over
-    a blurred fill of itself, the 16:9 frame sits underneath, and the band left
-    over carries the burned subtitles and the hook caption. The small copy of
-    the webcam that is baked into the gameplay is blurred away so his face does
-    not appear twice.
+    a blurred fill of itself. The gameplay comes next, cropped away from the
+    webcam side when the inset sits on an edge, so the game fills the frame and
+    the duplicate face is not shown. The band left over carries the burned
+    subtitles and the hook caption.
     """
+    geo = split_geometry(cam, src_w, src_h)
     x, y, w, h = parse_cam(cam)
     crop = f"crop={w}:{h}:{x}:{y}"
 
-    # Where the inset lands once the source is scaled into the gameplay band.
-    if src_w and src_h:
-        scale = min(1080 / src_w, SPLIT_GAME_H / src_h)
-    else:
-        scale = 0.5625
-    pad = 6
-
-    def even(v: int) -> int:
-        return max(0, int(v) - int(v) % 2)
-
-    sx, sy = even(max(0, x - pad)), even(max(0, y - pad))
-    sw, sh = even(w + 2 * pad), even(h + 2 * pad)
-    ox, oy = even(sx * scale), even(sy * scale)
-    ow, oh = max(2, even(sw * scale)), max(2, even(sh * scale))
-
-    return [
-        "[0:v]split=5[c1][c2][c3][c4][c5]",
-        f"[c1]{crop},scale=1080:{SPLIT_CAM_H}:force_original_aspect_ratio=increase,"
-        f"crop=1080:{SPLIT_CAM_H},gblur=sigma=18,eq=brightness=-0.2[cambg]",
-        f"[c2]{crop},scale=-2:{SPLIT_CAM_H}[camfg]",
+    parts = [
+        "[0:v]split=4[c1][c2][c3][c4]" if geo.crop
+        else "[0:v]split=5[c1][c2][c3][c4][c5]",
+        f"[c1]{crop},scale=1080:{geo.cam_h}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{geo.cam_h},gblur=sigma=18,eq=brightness=-0.2[cambg]",
+        f"[c2]{crop},scale=-2:{geo.cam_h}[camfg]",
         "[cambg][camfg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setsar=1[top]",
-        f"[c3]scale=1080:{SPLIT_GAME_H}:force_original_aspect_ratio=decrease[game0]",
-        # Blur the duplicate webcam inset that is baked into the gameplay frame.
-        f"[c5]crop={sw}:{sh}:{sx}:{sy},scale={ow}:{oh},gblur=sigma=8[patchblur]",
-        f"[game0][patchblur]overlay={ox}:{oy},format=yuv420p,setsar=1[game]",
-        "[c4]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,"
-        f"gblur=sigma=8,scale=1080:{SPLIT_BOT_H},eq=brightness=-0.3,"
-        "format=yuv420p,setsar=1[bot]",
-        "[top][game]vstack=inputs=2[tg]",
-        "[tg][bot]vstack=inputs=2[vbase]",
     ]
+
+    bot_input = "[c4]"
+    if geo.crop:
+        cx, cy, cw, ch = geo.crop
+        parts.append(
+            f"[c3]crop={cw}:{ch}:{cx}:{cy},"
+            f"scale=1080:{geo.game_h}:force_original_aspect_ratio=increase,"
+            f"crop=1080:{geo.game_h},format=yuv420p,setsar=1[game]"
+        )
+    else:
+        # No clean side to crop: scale the whole frame and blur the duplicate
+        # webcam inset that is baked into it.
+        scale = min(1080 / (src_w or 1920), geo.game_h / (src_h or 1080))
+        sx, sy = _even(max(0, x - 6)), _even(max(0, y - 6))
+        sw, sh = _even(w + 12), _even(h + 12)
+        ox, oy = _even(sx * scale), _even(sy * scale)
+        ow, oh = _even(sw * scale), _even(sh * scale)
+        bot_input = "[c5]"
+        parts.append(
+            f"[c3]scale=1080:{geo.game_h}:force_original_aspect_ratio=decrease[game0]"
+        )
+        parts.append(
+            f"[c4]crop={sw}:{sh}:{sx}:{sy},scale={ow}:{oh},gblur=sigma=8[patchblur]"
+        )
+        parts.append(
+            f"[game0][patchblur]overlay={ox}:{oy},format=yuv420p,setsar=1[game]"
+        )
+
+    parts.append(
+        f"{bot_input}scale=270:480:force_original_aspect_ratio=increase,crop=270:480,"
+        f"gblur=sigma=8,scale=1080:{geo.bot_h},eq=brightness=-0.3,"
+        "format=yuv420p,setsar=1[bot]"
+    )
+    parts.append("[top][game]vstack=inputs=2[tg]")
+    parts.append("[tg][bot]vstack=inputs=2[vbase]")
+    return parts
 
 
 class Cutter:
@@ -380,21 +540,36 @@ class Cutter:
         extra: list[Path] = []
         current = "vbase"
         index = 1
+        geo = (split_geometry(self.cam_spec(), prepared.width, prepared.height)
+               if cfg.layout == "split" else None)
+        sub_margin = 64 if vertical else 40
+        sub_ratio = 0.095 if style == "pop" else 0.062
+        sub_estimate = (int(1080 * sub_ratio * 1.7) if vertical else 160)
+        game_bottom = (geo.cam_h + geo.game_h) if geo else 1920
 
-        def overlay_png(text: str, path: Path, font_px: int, max_width: int,
-                        x: str, y: str, window: tuple[float, float] | None = None,
-                        pop: bool = False) -> None:
-            nonlocal current, index
-            # Real outlined font when ImageMagick is around, bitmap otherwise.
+        def draw_png(text: str, path: Path, font_px: int, max_width: int,
+                     pop: bool = False, font: str | None = None,
+                     fill: str = "white",
+                     char_width: float = 0.56) -> tuple[int, int]:
+            """Rasterise one overlay and register it as the next ffmpeg input."""
             drawn = None
+            # Real outlined font when ImageMagick is around, bitmap otherwise.
             if caption.has_styled():
                 if pop:
-                    drawn = caption.render_pop(text, path, max_width, cap_px=font_px)
+                    drawn = caption.render_pop(text, path, max_width,
+                                               cap_px=font_px, fill=fill)
                 else:
-                    drawn = caption.render_styled(text, font_px, path, max_width)
+                    drawn = caption.render_styled(text, font_px, path, max_width,
+                                                  font=font, fill=fill,
+                                                  char_width=char_width)
             if drawn is None:
-                caption.render(text, font_px, path, max_width)
+                drawn = caption.render(text, font_px, path, max_width)
             extra.append(path)
+            return drawn or (0, 0)
+
+        def overlay_png(x: str, y: str,
+                        window: tuple[float, float] | None = None) -> None:
+            nonlocal current, index
             label = f"vov{index}"
             enable = (f":enable='between(t,{window[0]:.3f},{window[1]:.3f})'"
                       if window else "")
@@ -403,18 +578,21 @@ class Cutter:
             index += 1
 
         if title:
-            font = find_font()
+            hook_font = caption.hook_font()
+            font = hook_font or find_font()
             if caption.has_drawtext() and font:
                 prepared.title_file.write_text(_wrap(title.upper()), encoding="utf-8")
-                size = int(1080 * 0.055) if vertical else int(max(320, prepared.height or 720) * 0.072)
-                if vertical:
+                size = int(1080 * 0.062) if vertical else int(max(320, prepared.height or 720) * 0.072)
+                if geo:
+                    y = f"h-{sub_margin + sub_estimate + 24}-text_h"
+                elif vertical:
                     y = "h*0.06" if style == "pop" else "h*0.70"
                 else:
                     y = "h-text_h-90"
                 parts.append(
                     f"[{current}]drawtext="
                     f"fontfile='{font}':textfile='{prepared.title_file.resolve().as_posix()}':"
-                    f"fontcolor=white:fontsize={size}:line_spacing=8:"
+                    f"fontcolor=0xFFD23F:fontsize={size}:line_spacing=8:"
                     "box=1:boxcolor=black@0.55:boxborderw=26:"
                     f"x=(w-text_w)/2:y={y}:"
                     "shadowcolor=black@0.65:shadowx=2:shadowy=2[vdraw]"
@@ -423,21 +601,41 @@ class Cutter:
             else:
                 font_px = int(1080 * 0.068) if vertical else int(max(320, prepared.height or 720) * 0.10)
                 max_width = int((1080 if vertical else (prepared.width or 1280)) * 0.9)
-                x, y = caption.overlay_expr(cfg.layout, style)
-                overlay_png(title, prepared.work / "title.png", font_px, max_width, x, y)
+                if vertical:
+                    # Keep the hook on one line: the band under the game is
+                    # shallow, and a two-line hook would run into the subtitles.
+                    fitting = int(max_width / (max(1, len(title)) * 0.75))
+                    font_px = max(34, min(font_px, fitting))
+                _, height = draw_png(
+                    title, prepared.work / "title.png", font_px, max_width,
+                    font=hook_font, fill=caption.HOOK_FILL,
+                    char_width=0.72 if hook_font else 0.56,
+                )
+                if geo:
+                    # Just under the gameplay, above the subtitle band; if the
+                    # hook is tall it may sit slightly higher, never on the subs.
+                    limit = 1920 - sub_margin - sub_estimate - height - 20
+                    y = str(max(game_bottom + 18, limit))
+                    x = "(main_w-overlay_w)/2"
+                else:
+                    x, y = caption.overlay_expr(cfg.layout, style)
+                overlay_png(x, y)
 
         if cues:
             shown = transcribe.pop_chunks(cues) if style == "pop" else cues
             base = 1080 if vertical else max(320, prepared.width or 1280)
             max_width = int((1080 if vertical else (prepared.width or 1280)) * 0.92)
-            font_px = int(base * (0.095 if style == "pop" else 0.062))
-            x, y = caption.subtitle_expr(cfg.layout, style)
+            font_px = int(base * sub_ratio)
+            if geo:
+                x, y = "(main_w-overlay_w)/2", f"main_h-{sub_margin}-overlay_h"
+            else:
+                x, y = caption.subtitle_expr(cfg.layout, style)
             for position, cue in enumerate(shown):
-                overlay_png(
+                draw_png(
                     cue.text, prepared.work / f"sub_{position:03d}.png",
-                    font_px, max_width, x, y, window=(cue.start, cue.end),
-                    pop=(style == "pop"),
+                    font_px, max_width, pop=(style == "pop"),
                 )
+                overlay_png(x, y, window=(cue.start, cue.end))
 
         parts.append(f"[{current}]null[vout]")
         return ";".join(parts), True, extra

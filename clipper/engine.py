@@ -310,7 +310,7 @@ class Engine:
                 pass
             self._auto = True
             self.log("auto on — vertical frame, webcam follow, synced captions, "
-                     "hook quoted from the clip")
+                     "hook from chat or the clip")
         else:
             if self._manual_before_auto:
                 try:
@@ -955,9 +955,10 @@ class Engine:
             else:
                 self.log(f"no subtitles for this clip: {note}")
                 meta["subtitles"] = {"engine": note, "cues": 0}
-        # The hook quotes the clip's own words, so it can only be chosen once the
-        # transcript exists.
-        meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues)
+        # The hook only knows what the clip is about once the transcript and chat
+        # excerpt exist: a repeated chat phrase wins, then a quotable line.
+        meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
+                                   meta.get("chat_excerpt", []))
         name = clip_filename(self.channel, meta["score"], meta.get("stamp"))
         out = self.cfg.out_dir / name
         index = 2
