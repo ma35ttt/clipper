@@ -23,7 +23,8 @@ from clipper import transcribe  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
 from clipper.cutter import (Cutter, hook_from_chat, hook_from_cues,  # noqa: E402
-                            pick_title, split_geometry, split_graph)
+                            hook_keyword, hook_question, pick_title,
+                            split_geometry, split_graph)
 from clipper.engine import Engine  # noqa: E402
 from clipper.hls import HLSBuffer, parse_playlist  # noqa: E402
 from clipper.hls import Segment  # noqa: E402
@@ -522,6 +523,24 @@ class SplitLayoutTest(unittest.TestCase):
         self.assertEqual(geo.game_h, 608)
         self.assertIn("patchblur", ";".join(split_graph("760:400:400:300")))
 
+    def test_split_without_a_detected_camera_falls_back_to_blur(self):
+        from clipper.cutter import Prepared
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            prep = Prepared(work=tmp_path, list_path=tmp_path / "list.txt",
+                            offset=0.0, duration=5.0, width=1920, height=1080,
+                            title_file=tmp_path / "title.txt")
+            auto = Cutter(Config(layout="split", cam="auto",
+                                 work_dir=tmp_path / "work"))
+            graph, _, _ = auto._graph(prep, "", [])
+            self.assertNotIn("vstack", graph)
+            self.assertIn("gblur=sigma=7", graph)
+
+            pinned = Cutter(Config(layout="split", cam="1504:550:294:266",
+                                   work_dir=tmp_path / "work2"))
+            graph, _, _ = pinned._graph(prep, "", [])
+            self.assertIn("vstack=inputs=2", graph)
+
     def test_hook_quotes_the_clip_not_chat(self):
         cues = [transcribe.Cue(0, 2, "no way dude"),
                 transcribe.Cue(2, 4, "look at that car")]
@@ -549,9 +568,34 @@ class SplitLayoutTest(unittest.TestCase):
         self.assertEqual(hook_from_chat([{"user": "a", "text": "LOL"},
                                          {"user": "b", "text": "LOL"}]), "")
 
-    def test_a_short_question_is_the_last_resort_hook(self):
+    def test_a_short_question_is_a_hook(self):
         cues = [transcribe.Cue(0, 1.5, "Where is my Tia?")]
         self.assertEqual(pick_title(Config(), {}, cues, []), "WHERE IS MY TIA?")
+
+    def test_a_question_beats_a_generic_reaction(self):
+        cues = [transcribe.Cue(0, 4.0,
+                               "play. Holy fucking map! Is this the fucking "
+                               "bridge I jumped off Teef")]
+        self.assertEqual(pick_title(Config(), {}, cues, []),
+                         "IS THIS THE FUCKING BRIDGE I JUMPED OFF?")
+
+    def test_an_interrogative_without_a_question_mark_still_counts(self):
+        cues = [transcribe.Cue(0, 2.0, "Where is the boat going")]
+        self.assertEqual(hook_question(cues), "WHERE IS THE BOAT GOING?")
+
+    def test_one_word_chat_consensus_is_the_last_resort(self):
+        chat = [{"user": name, "text": "back"}
+                for name in ("a", "b", "c", "d")]
+        cues = [transcribe.Cue(0, 2.0, "The way back back I")]
+        self.assertEqual(hook_keyword(chat), "BACK")
+        self.assertEqual(pick_title(Config(), {}, cues, chat), "CHAT SAYS BACK")
+
+    def test_one_person_spamming_a_word_is_not_consensus(self):
+        chat = [{"user": "a", "text": "BACK"}] * 6
+        self.assertEqual(hook_keyword(chat), "")
+
+    def test_split_is_the_default_layout(self):
+        self.assertEqual(Config().layout, "split")
 
 
 class CameraTest(unittest.TestCase):
@@ -717,7 +761,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_apply_reports_only_real_changes(self):
         cfg = Config()
-        changed = profile.apply(cfg, {"threshold": 0.4, "layout": "split",
+        changed = profile.apply(cfg, {"threshold": 0.4, "layout": "blur",
                                       "bot_filter": False})
         self.assertEqual(sorted(changed), ["bot_filter", "layout", "threshold"])
         self.assertEqual(cfg.threshold, 0.4)

@@ -29,8 +29,8 @@ No Python dependencies. Pure stdlib + `ffmpeg`.
 # 1. check the environment (ffmpeg, encoders, captions, output dir)
 python3 -m clipper doctor
 
-# 2. clip a live Twitch channel
-python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc --layout blur
+# 2. clip a live Twitch channel (default split framing: cam on top, game below)
+python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc
 
 # 3. clips land in ./clips, watch them at the local console
 open http://127.0.0.1:8756
@@ -75,8 +75,9 @@ One ingest, one render queue, no worker fan-out — the lightest the pipeline ge
   candidates with a fast transcript.
 - **Cuts on trigger**, with configurable lead-in (`--pre`) and tail (`--post`), auto
   extending while the hype continues (up to `--max-post`).
-- **Exports post-ready clips**: 1080x1920 (fill) or blurred-background 9:16, a hook
-  caption, `+faststart`, plus a `.json` sidecar with the score breakdown and chat excerpt.
+- **Exports post-ready clips**: 1080x1920 as a webcam-top split (default), fill, or
+  blurred-background 9:16, a hook caption, `+faststart`, plus a `.json` sidecar with the
+  score breakdown and chat excerpt.
 - **Lets you drive it live** from a local control panel: tune every knob, hit **AUTO**,
   record on demand with **REC**, and manage clips — per-streamer settings are remembered.
 - **Never writes to the platforms.** Read-only: anonymous chat, read-only stream.
@@ -122,7 +123,7 @@ Presets: `--profile sensitive | default | conservative`.
 --layout horizontal   # as-is (16:9), fastest render
 --layout vertical     # scale + centre crop to 1080x1920 (fill)
 --layout blur         # 9:16 with a blurred fill behind the full frame
---layout split        # webcam on top, gameplay in the middle, captions below
+--layout split        # default: webcam on top, gameplay, captions below
 --cam auto            # find the streamer's webcam and follow it as they move (split)
 --cam 0:539:367:294   # or pin the webcam box x:y:w:h by hand (split only)
 --subs-style pop      # popping word-chunks on a pill (default)
@@ -142,7 +143,8 @@ pixels, and the narrower crop makes the game fill more of the frame instead of s
 letterboxed strip. The game band grows from 608 to roughly 780 px tall for a bottom-right
 camera, and the caption band shrinks to match. If the webcam floats in the middle of the
 frame (no clean side to cut), clipper keeps the full frame and blurs the duplicate inset
-instead.
+instead. If no webcam is detected at all, `split` falls back to the blurred 9:16 frame
+rather than cropping a guessed region of the gameplay.
 
 **The webcam is found automatically.** `--cam auto` is the default: clipper samples a
 dozen frames of the stream and runs face detection on each, then keeps the face that
@@ -156,19 +158,26 @@ clipper frame -i https://twitch.tv/xqc     # see the detected box drawn on a fra
 ```
 
 `clipper frame` also prints the box to copy into a fixed `--cam x:y:w:h`, which always
-overrides detection. Detection needs macOS (Vision); elsewhere, or if no face is found,
-clipper falls back to the measured xQc box `0:539:367:294`.
+overrides detection. Detection needs macOS (Vision); if it is unavailable, or no face is
+found, pin the box with `--cam` or the clip falls back to the blurred layout.
 
 ### Hook captions
 
-With `--title-mode auto` the hook is chosen from what the clip is actually about. First it
-looks for a phrase **chat keeps repeating** in the clip window — "LOOK AT THE MAP" from
-three different people becomes `CHAT SAYS LOOK AT THE MAP`. Requiring at least two messages
-from two different users stops one loud person from inventing a hook, and generic chatter
-(`LOL`, `W`, `KEKW`, one-word reactions) is ignored. If chat has no consensus, it falls back
-to a quotable line from the transcript (`"NO WAY"`, `"WHAT IS HAPPENING"`), then to a short
-genuine question. When none of those exist the clip simply gets no hook, which beats a
-caption that means nothing.
+With `--title-mode auto` the hook is chosen from what the clip is actually about, in this
+order:
+
+1. A phrase **chat keeps repeating** — "LOOK AT THE MAP" from three different people becomes
+   `CHAT SAYS LOOK AT THE MAP`. At least two messages from two different users are required,
+   so one loud person cannot invent a hook.
+2. A **genuine question** from the transcript — `IS THIS THE FUCKING BRIDGE I JUMPED OFF?`.
+   A question is what makes a viewer stop, so it beats a generic reaction like `HOLY`. It is
+   recognised from a `?` or an interrogative opening word, and cut to eight words.
+3. A quotable line from the transcript (`NO WAY`, `WHAT IS HAPPENING`).
+4. One word several different people typed on its own (`CHAT SAYS BACK`).
+5. Nothing — an honest empty hook beats a caption that means nothing.
+
+Generic chatter (`LOL`, `W`, `KEKW`, one-word reactions) is ignored throughout. When none of
+the above exists the clip simply gets no hook.
 
 The hook is deliberately **not styled like the subtitles**: it uses a heavier title face
 (Arial Black when installed), gold `#FFD23F` fill with a black outline, and sits between the
@@ -309,6 +318,8 @@ python3 -m clipper multi \
 - The master console is on `--port` (default `8756`); workers take the next free ports.
   `grid / single` toggles between the tiled view and one full channel.
 - Each worker runs independently — one channel dropping never stops the others.
+- Renders are **serialised across workers**: only one ffmpeg encode runs at a time, so two
+  streams cannot trip the memory limit and drop captions from an otherwise fine clip.
 
 Keep it realistic: each worker is a live ffmpeg ingest plus render jobs, so 3–4 channels
 is a sensible ceiling on a laptop. Prefer `--layout horizontal` or `--encoder

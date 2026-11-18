@@ -32,12 +32,12 @@ def _add_run_args(p: argparse.ArgumentParser, include_source: bool = True) -> No
     p.add_argument("--out", default="clips", help="where clips are written (default: clips)")
     p.add_argument("--work", default=".clipper", help="scratch directory (default: .clipper)")
     p.add_argument("--profile", choices=sorted(PRESETS), help="trigger tuning preset")
-    p.add_argument("--layout", choices=LAYOUTS, help="output framing (default: blur)")
+    p.add_argument("--layout", choices=LAYOUTS, help="output framing (default: split)")
     p.add_argument("--cam",
                    help="webcam box x:y:w:h in source pixels for --layout split, or "
                         "'auto' to detect the streamer's face and follow them "
-                        "(default: auto; fallback "
-                        f"{DEFAULT_CAM})")
+                        "(default: auto; if no face is found, split uses the "
+                        "blurred frame instead of guessing a crop)")
     p.add_argument("--cam-interval", type=float,
                    help="seconds between automatic camera re-detections (default: 90)")
     p.add_argument("--threshold", type=float, help="hype trigger threshold 0..1 (default: 0.62)")

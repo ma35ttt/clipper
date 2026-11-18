@@ -67,7 +67,7 @@ class Config:
     # --- output -----------------------------------------------------------
     out_dir: Path = Path("clips")
     work_dir: Path = Path(".clipper")
-    layout: str = "blur"
+    layout: str = "split"
     cam: str = "auto"          # webcam box x:y:w:h, used by --layout split
     cam_interval: float = 90.0  # seconds between automatic camera re-detection
     title_mode: str = "auto"

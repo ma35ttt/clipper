@@ -22,7 +22,7 @@ HOOK_PHRASES = (
     "you're trolling", "you are trolling", "im done", "i'm done", "i am done",
     "lets go", "let's go", "no shot", "you're kidding", "shut up", "bro what",
     "no way", "no no no", "wait what", "what happened", "get out of here",
-    "holy", "insane", "what is happening", "he's so bad", "he is so bad",
+    "what is happening", "he's so bad", "he is so bad",
     "i can't", "i cant", "look at this", "watch this",
 )
 
@@ -131,13 +131,82 @@ def hook_from_chat(chat) -> str:
     return best
 
 
-def hook_question(cues) -> str:
-    """A short genuine question from the clip, as a last-resort hook."""
+def hook_keyword(chat) -> str:
+    """One word chat keeps shouting on its own ("BACK", "MAP", "COOKED").
+
+    A single word is only trusted when several different people typed it as a
+    message of its own — that is consensus, not one person spamming. It is the
+    last resort after a repeated phrase, a question and a quotable line, but it
+    is still grounded in this clip.
+    """
+    from collections import Counter, defaultdict
+
+    counts: Counter[str] = Counter()
+    users: defaultdict[str, set[str]] = defaultdict(set)
+    for index, message in enumerate(chat or ()):
+        text, user = _chat_text(message)
+        text = re.sub(r"[^A-Za-z0-9' ]+", " ", text.upper())
+        words = re.sub(r"\s+", " ", text).strip().split()
+        if len(words) != 1:
+            continue
+        word = words[0]
+        if (len(word) < 4 or word in CHAT_NOISE or word in CHAT_STOPWORDS
+                or word in CHAT_PROFANITY):
+            continue
+        counts[word] += 1
+        users[word].add(user or f"#{index}")
+
+    best, best_score = "", 0
+    for word, count in counts.items():
+        people = len(users[word])
+        if count < 3 or people < 3:
+            continue
+        score = count * people
+        if score > best_score or (score == best_score and len(word) > len(best)):
+            best, best_score = word, score
+    return best
+
+
+QUESTION_STARTS = {
+    "IS", "ARE", "WAS", "WERE", "AM", "DO", "DOES", "DID", "CAN", "COULD",
+    "WOULD", "WILL", "SHOULD", "WHAT", "WHERE", "WHY", "HOW", "WHO", "WHEN",
+    "WHOSE", "WHICH", "HAVE", "HAS", "HAD",
+}
+
+
+def hook_question(cues, max_words: int = 8, max_chars: int = 52) -> str:
+    """The shortest genuine question in the clip, or "".
+
+    A question is what a viewer actually clicks on ("is this the bridge I
+    jumped off?"), so it beats a generic reaction like "HOLY". Whisper often
+    packs several sentences into one cue, so clauses are split on punctuation
+    before looking for the question; when the recogniser dropped the question
+    mark, an interrogative opening word counts too. Long questions are cut to
+    the first ``max_words`` words — the extra words are usually a mangled name
+    or a trailing aside, and the question still reads.
+    """
     for cue in cues or ():
         text = re.sub(r"\s+", " ", str(cue.text)).strip()
-        words = text.split()
-        if "?" in text and 3 <= len(words) <= 8 and len(text) <= 38:
-            return text.upper()
+        for clause in re.split(r"(?<=[.!?])\s+", text):
+            clause = clause.strip()
+            if len(clause) < 6:
+                continue
+            words = clause.split()
+            if not 3 <= len(words) <= max_words * 2:
+                continue
+            opening = re.sub(r"[^A-Za-z]", "", words[0]).upper()
+            if "?" not in clause and opening not in QUESTION_STARTS:
+                continue
+            if len(words) > max_words:
+                words = words[:max_words]
+                clause = " ".join(words) + "?"
+            clause = " ".join(clause.split())
+            clause = re.sub(r"[^A-Za-z0-9'!? ]+$", "", clause).strip()
+            if not clause.endswith("?"):
+                clause += "?"
+            if len(clause) > max_chars:
+                continue
+            return clause.upper()
     return ""
 
 
@@ -149,10 +218,16 @@ def pick_title(cfg: Config, signals: dict, cues=(), chat=()) -> str:
     repeated = hook_from_chat(chat)
     if repeated:
         return f"CHAT SAYS {repeated}"
+    question = hook_question(cues)
+    if question:
+        return question
     quote = hook_from_cues(cues)
     if quote:
         return quote
-    return hook_question(cues)
+    keyword = hook_keyword(chat)
+    if keyword:
+        return f"CHAT SAYS {keyword}"
+    return ""
 
 
 def _wrap(text: str, width: int = 20) -> str:
@@ -176,6 +251,32 @@ SPLIT_BOT_MIN = 440   # space kept below the game for the hook and subtitles
 # Candidate verification runs while the loop is live, so it gets fewer threads
 # than subtitle transcription — it just needs to be quick, not perfect.
 VERIFY_THREADS = 2
+
+
+# Only one ffmpeg render at a time across every worker. Two 1080x1920 encodes
+# at once is enough to trip macOS jetsam on an 8 GB laptop, and the retry then
+# drops captions from a clip that would have rendered fine on its own. The lock
+# is per machine (TMPDIR), released when the handle closes.
+def _render_lock(timeout: float = 900.0):
+    try:
+        import fcntl
+    except ImportError:  # Windows: no advisory locks, just render
+        return None
+    path = Path(os.environ.get("TMPDIR") or "/tmp") / "clipper-render.lock"
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(0.5)
 
 
 def _even(value: float) -> int:
@@ -356,8 +457,11 @@ class Cutter:
         cues = cues if cues is not None else []
         tmp_out = prepared.work / "render.mp4"
 
-        plan: list[tuple[str, list, str]] = []
-        seen: set[tuple[bool, bool]] = set()
+        # Try the full-quality render twice before degrading: a jetsam kill is
+        # transient, and dropping the hook or subtitles on the first failure is
+        # what made good clips come out bare.
+        plan: list[tuple[str, list, str]] = [(title, cues, ""), (title, cues, "")]
+        seen: set[tuple[bool, bool]] = {(bool(title), bool(cues))}
 
         def add(attempt_title: str, attempt_cues: list, note: str) -> None:
             key = (bool(attempt_title), bool(attempt_cues))
@@ -365,23 +469,33 @@ class Cutter:
                 seen.add(key)
                 plan.append((attempt_title, attempt_cues, note))
 
-        add(title, cues, "")
         add("", cues, "hook caption dropped")
         add(title, [], "subtitles dropped")
         add("", [], "all captions dropped" if (title or cues) else "")
 
         warning = ""
         last_error = ""
-        for attempt_title, attempt_cues, note in plan:
-            timeout = 900 if not warning else 600
-            result = run(self._args(prepared, tmp_out, attempt_title, attempt_cues),
-                         timeout=timeout)
-            if result.returncode == 0:
-                warning = note
-                break
-            last_error = (result.stderr or "").strip()[-600:]
-        else:
-            return False, last_error, warning
+        lock = _render_lock()
+        try:
+            for attempt_title, attempt_cues, note in plan:
+                timeout = 900 if not warning else 600
+                result = run(self._args(prepared, tmp_out, attempt_title, attempt_cues),
+                             timeout=timeout)
+                if result.returncode == 0:
+                    warning = note
+                    break
+                last_error = (result.stderr or "").strip()[-600:]
+            else:
+                return False, last_error, warning
+        finally:
+            if lock is not None:
+                lock.close()
+
+        if warning and last_error:
+            # Say why a caption was dropped: a bare "subtitles dropped" leaves
+            # nobody able to tell a memory kill from a graph error.
+            reason = last_error.strip().splitlines()[-1][:160]
+            warning = f"{warning} — {reason}"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tmp_out, out_path)
@@ -402,9 +516,15 @@ class Cutter:
         return style if style in ("pop", "block") else "pop"
 
     def cam_spec(self) -> str:
-        """The webcam box to crop with: the detected/known one, or the fallback."""
-        spec = getattr(self.cfg, "cam", "") or ""
-        return DEFAULT_CAM if spec in ("", "auto") else spec
+        """The webcam box to use, or "" while detection has not found one.
+
+        ``auto`` is not a box: when the watcher has not found a face (a stream
+        with no webcam, or a machine without Vision) the split layout falls back
+        to the blurred 9:16 frame rather than cropping a guessed region of the
+        gameplay.
+        """
+        spec = (getattr(self.cfg, "cam", "") or "").strip()
+        return "" if spec.lower() == "auto" else spec
 
     def speech_wav(self, prepared: Prepared) -> Path | None:
         """Extract a cleaned 16 kHz mono wav over the clip's exact audio window."""
@@ -511,18 +631,22 @@ class Cutter:
     def _graph(self, prepared: Prepared, title: str,
                cues: list) -> tuple[str, bool, list[Path]]:
         cfg = self.cfg
-        vertical = cfg.layout != "horizontal"
+        cam = self.cam_spec()
+        # No detected webcam means there is nothing to put across the top: show
+        # the blurred 9:16 frame instead of cropping a guessed region.
+        layout = "blur" if cfg.layout == "split" and not cam else cfg.layout
+        vertical = layout != "horizontal"
         style = self.caption_style()
-        if cfg.layout == "horizontal" and not title and not cues:
+        if layout == "horizontal" and not title and not cues:
             return "", False, []
 
         parts: list[str] = []
-        if cfg.layout == "vertical":
+        if layout == "vertical":
             parts.append(
                 "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 "crop=1080:1920,setsar=1[vbase]"
             )
-        elif cfg.layout == "blur":
+        elif layout == "blur":
             # Blur a quarter-size frame and upscale: identical look, ~16x cheaper.
             parts.append("[0:v]split=2[bg][fg]")
             parts.append(
@@ -532,16 +656,16 @@ class Cutter:
             )
             parts.append("[fg]scale=1080:1920:force_original_aspect_ratio=decrease[f]")
             parts.append("[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]")
-        elif cfg.layout == "split":
-            parts.extend(split_graph(self.cam_spec(), prepared.width, prepared.height))
+        elif layout == "split":
+            parts.extend(split_graph(cam, prepared.width, prepared.height))
         else:
             parts.append("[0:v]setsar=1[vbase]")
 
         extra: list[Path] = []
         current = "vbase"
         index = 1
-        geo = (split_geometry(self.cam_spec(), prepared.width, prepared.height)
-               if cfg.layout == "split" else None)
+        geo = (split_geometry(cam, prepared.width, prepared.height)
+               if layout == "split" else None)
         sub_margin = 64 if vertical else 40
         sub_ratio = 0.095 if style == "pop" else 0.062
         sub_estimate = (int(1080 * sub_ratio * 1.7) if vertical else 160)
@@ -604,8 +728,8 @@ class Cutter:
                 if vertical:
                     # Keep the hook on one line: the band under the game is
                     # shallow, and a two-line hook would run into the subtitles.
-                    fitting = int(max_width / (max(1, len(title)) * 0.75))
-                    font_px = max(34, min(font_px, fitting))
+                    fitting = int(max_width / (max(1, len(title)) * 0.72))
+                    font_px = max(28, min(font_px, fitting))
                 _, height = draw_png(
                     title, prepared.work / "title.png", font_px, max_width,
                     font=hook_font, fill=caption.HOOK_FILL,
@@ -618,7 +742,7 @@ class Cutter:
                     y = str(max(game_bottom + 18, limit))
                     x = "(main_w-overlay_w)/2"
                 else:
-                    x, y = caption.overlay_expr(cfg.layout, style)
+                    x, y = caption.overlay_expr(layout, style)
                 overlay_png(x, y)
 
         if cues:
@@ -629,7 +753,7 @@ class Cutter:
             if geo:
                 x, y = "(main_w-overlay_w)/2", f"main_h-{sub_margin}-overlay_h"
             else:
-                x, y = caption.subtitle_expr(cfg.layout, style)
+                x, y = caption.subtitle_expr(layout, style)
             for position, cue in enumerate(shown):
                 draw_png(
                     cue.text, prepared.work / f"sub_{position:03d}.png",
