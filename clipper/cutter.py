@@ -345,13 +345,19 @@ def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
     geo = split_geometry(cam, src_w, src_h)
     x, y, w, h = parse_cam(cam)
     crop = f"crop={w}:{h}:{x}:{y}"
+    # A webcam inset is small. Filling a 1080-wide band with it is a big
+    # upscale, and soft footage reads as "broken" next to crisp gameplay, so
+    # give the face band a little edge back when it is stretched hard.
+    sharpen = ""
+    if h > 0 and geo.cam_h / h >= 2.2:
+        sharpen = ",unsharp=5:5:0.8:5:5:0.0"
 
     parts = [
         "[0:v]split=4[c1][c2][c3][c4]" if geo.crop
         else "[0:v]split=5[c1][c2][c3][c4][c5]",
         f"[c1]{crop},scale=1080:{geo.cam_h}:force_original_aspect_ratio=increase,"
         f"crop=1080:{geo.cam_h},gblur=sigma=18,eq=brightness=-0.2[cambg]",
-        f"[c2]{crop},scale=-2:{geo.cam_h}[camfg]",
+        f"[c2]{crop},scale=-2:{geo.cam_h}{sharpen}[camfg]",
         "[cambg][camfg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setsar=1[top]",
     ]
 
@@ -499,7 +505,6 @@ class Cutter:
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tmp_out, out_path)
-        shutil.rmtree(prepared.work, ignore_errors=True)
         return True, "", warning
 
     # -- step 2b: subtitles -------------------------------------------------
@@ -545,23 +550,76 @@ class Cutter:
         return wav
 
     def transcribe(self, prepared: Prepared, model: str | None = None,
-                   threads: int | None = None) -> tuple[list, str]:
-        """Speech-to-text over the exact audio window the clip will use."""
+                   threads: int | None = None, streamer: bool = True,
+                   focus: float | None = None,
+                   log=lambda message: None) -> tuple[list, str]:
+        """Speech-to-text over the exact audio window the clip will use.
+
+        ``streamer`` gates the result down to the streamer's own voice (see
+        :mod:`clipper.speaker`); the verifier turns it off because it only needs
+        to know whether *anything* was said.
+        """
         wav = self.speech_wav(prepared)
         if wav is None:
             return [], "could not extract clip audio"
         try:
-            return transcribe.transcribe(
-                wav,
-                model=model if model is not None else getattr(self.cfg, "subs_model", None),
-                language=getattr(self.cfg, "subs_language", "en") or "en",
-                prompt=getattr(self.cfg, "subs_prompt", None),
-                # Cue grouping is only a fallback now: popping captions use the
-                # token timings directly, and block captions want readable lines.
-                max_chars=44,
-                threads=threads if threads is not None
-                else getattr(self.cfg, "subs_threads", 0),
-            )
+            return self.transcribe_wav(wav, prepared, model=model,
+                                       threads=threads, streamer=streamer,
+                                       focus=focus, log=log)
+        finally:
+            try:
+                wav.unlink()
+            except OSError:
+                pass
+
+    def transcribe_wav(self, wav: Path, prepared: Prepared, model: str | None = None,
+                       threads: int | None = None, streamer: bool = True,
+                       focus: float | None = None,
+                       log=lambda message: None) -> tuple[list, str]:
+        """Decode a prepared wav, then gate it to the streamer."""
+        cues, note = transcribe.transcribe(
+            wav,
+            model=model if model is not None else getattr(self.cfg, "subs_model", None),
+            language=getattr(self.cfg, "subs_language", "en") or "en",
+            prompt=getattr(self.cfg, "subs_prompt", None),
+            # Cue grouping is only a fallback now: popping captions use the
+            # token timings directly, and block captions want readable lines.
+            max_chars=44,
+            threads=threads if threads is not None
+            else getattr(self.cfg, "subs_threads", 0),
+        )
+        if streamer and cues:
+            from . import speaker
+
+            cues, gate_note = speaker.streamer_only(
+                cues, prepared, self.cam_spec(), wav, self.cfg.work_dir,
+                focus=focus, log=log)
+            if gate_note:
+                note += " · " + gate_note
+        return cues, note
+
+    def transcribe_rendered(self, media: Path, prepared: Prepared,
+                            focus: float | None = None,
+                            log=lambda message: None) -> tuple[list, str]:
+        """Transcribe the finished clip's own audio track.
+
+        The live buffer is copied while ffmpeg is still writing it; rarely, that
+        copy comes out silent or short and whisper then "hears" a few words in
+        nothing. The rendered file is the audio the viewer will actually get, so
+        it is the safer second opinion.
+        """
+        wav = prepared.work / "retry.wav"
+        args = [
+            FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(media), "-vn",
+            "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav),
+        ]
+        result = run(args, timeout=180)
+        if result.returncode != 0 or not wav.exists():
+            return [], "could not read the clip audio"
+        try:
+            return self.transcribe_wav(wav, prepared, focus=focus, log=log)
         finally:
             try:
                 wav.unlink()

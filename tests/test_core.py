@@ -9,8 +9,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -637,6 +639,90 @@ class CameraTest(unittest.TestCase):
     def test_format_box(self):
         self.assertEqual(camera.format_box((14, 552, 344, 312)), "14:552:344:312")
 
+    def test_talking_intervals_follow_the_mouth(self):
+        # Eight seconds of a still mouth with one second of speech in it.
+        ratios = [0.75, 0.76, 0.74, 0.75] * 12
+        ratios[18:24] = [0.86, 0.90, 0.92, 0.88, 0.90, 0.86]
+        timeline = camera.talking_intervals(ratios, fps=6.0, duration=8.0)
+        self.assertIsNotNone(timeline)
+        self.assertGreater(timeline.activity, 0.08)
+        self.assertTrue(timeline.talking(3.1, 3.4))
+        self.assertFalse(timeline.talking(6.0, 6.5))
+
+    def test_a_still_mouth_is_not_talking(self):
+        ratios = [0.75 + 0.004 * (index % 3) for index in range(60)]
+        timeline = camera.talking_intervals(ratios, fps=6.0)
+        self.assertIsNotNone(timeline)
+        self.assertEqual(timeline.activity, 0.0)
+
+    def test_talking_intervals_refuse_an_unreliable_face(self):
+        ratios = [None] * 8 + [0.72] * 4
+        self.assertIsNone(camera.talking_intervals(ratios, fps=6.0))
+
+    def test_expand_keeps_a_bottom_anchored_webcam_inside_the_frame(self):
+        # Measured on ohnepixel: the facecam sits on the bottom edge.
+        face = camera.Face(384 / 1920, 823 / 1080, 163 / 1920, 163 / 1080)
+        x, y, w, h = camera.expand_to_cam(face, 1920, 1080)
+        self.assertLessEqual(y + h, 1080)
+        self.assertLessEqual(x + w, 1920)
+        face_middle = (face.y + face.h / 2) * 1080
+        # The face stays in the upper part of the crop instead of being pushed
+        # to the bottom by clamping the box to the frame.
+        self.assertLessEqual(face_middle - y, h * 0.8)
+
+
+class SpeakerGateTest(unittest.TestCase):
+    @staticmethod
+    def _cues() -> "transcribe.Cues":
+        words = [transcribe.Cue(0.0, 0.3, "Game"),
+                 transcribe.Cue(1.0, 1.3, "me"),
+                 transcribe.Cue(5.0, 5.3, "talking")]
+        return transcribe.Cues(words, words)
+
+    def _prepared(self) -> types.SimpleNamespace:
+        return types.SimpleNamespace(list_path=Path("concat.txt"), offset=0.0,
+                                     duration=6.0, work=Path(tempfile.mkdtemp()))
+
+    def test_words_spoken_while_the_mouth_is_still_are_dropped(self):
+        from clipper import speaker
+
+        timeline = camera.TalkTimeline(((0.85, 1.6), (4.85, 5.6)), 1.0, 6.0)
+        with mock.patch.object(camera, "analyse", return_value=timeline):
+            gated, note = speaker.streamer_only(
+                self._cues(), self._prepared(), "0:0:100:100", None, Path("."))
+        self.assertEqual([word.text for word in gated.words], ["me", "talking"])
+        self.assertIn("webcam gate", note)
+        self.assertIn("1 word", note)
+
+    def test_everything_is_dropped_when_only_other_voices_talk(self):
+        from clipper import speaker
+
+        timeline = camera.TalkTimeline((), 1.0, 6.0)
+        with mock.patch.object(camera, "analyse", return_value=timeline):
+            gated, note = speaker.streamer_only(
+                self._cues(), self._prepared(), "0:0:100:100", None, Path("."))
+        self.assertEqual(list(gated), [])
+        self.assertIn("another voice", note)
+
+    def test_without_a_camera_or_a_model_nothing_is_touched(self):
+        from clipper import speaker
+
+        cues = self._cues()
+        with mock.patch.object(transcribe, "find_tdrz_model", return_value=None):
+            gated, note = speaker.streamer_only(
+                cues, self._prepared(), "", Path("speech.wav"), Path("."))
+        self.assertIs(gated, cues)
+        self.assertEqual(note, "")
+
+    def test_an_unreliable_webcam_keeps_every_cue(self):
+        from clipper import speaker
+
+        cues = self._cues()
+        with mock.patch.object(camera, "analyse", return_value=None):
+            gated, _ = speaker.streamer_only(
+                cues, self._prepared(), "0:0:100:100", None, Path("."))
+        self.assertIs(gated, cues)
+
 
 class CutterTest(unittest.TestCase):
     @staticmethod
@@ -870,6 +956,17 @@ class ConsoleTest(unittest.TestCase):
         bad = self.engine.apply_settings({"layout": "nope"})
         self.assertFalse(bad["ok"])
         self.assertIn("must be one of", bad["error"])
+
+    def test_thin_transcript_flags_a_clip_that_lost_its_speech(self):
+        thin = transcribe.Cues([transcribe.Cue(0.0, 1.0, "me")],
+                               [transcribe.Cue(0.0, 1.0, "me")])
+        self.assertTrue(self.engine._thin_transcript(thin, {"duration_s": 20}))
+        words = [transcribe.Cue(index, index + 0.5, f"w{index}")
+                 for index in range(8)]
+        self.assertFalse(self.engine._thin_transcript(
+            transcribe.Cues(words, words), {"duration_s": 20}))
+        # Short clips have no expectations to fail.
+        self.assertFalse(self.engine._thin_transcript(thin, {"duration_s": 3}))
 
     def test_auto_applies_and_restores(self):
         self.cfg.cam = "1:2:3:4"

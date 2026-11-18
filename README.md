@@ -147,11 +147,19 @@ instead. If no webcam is detected at all, `split` falls back to the blurred 9:16
 rather than cropping a guessed region of the gameplay.
 
 **The webcam is found automatically.** `--cam auto` is the default: clipper samples a
-dozen frames of the stream and runs face detection on each, then keeps the face that
-appears in *almost every* frame — that is the streamer's camera, whereas faces in the
-gameplay come and go. So when the streamer drags their camera somewhere new on screen,
-the crop follows within `--cam-interval` seconds (default 90). Detection runs in the
-background, off the ingest loop.
+dozen frames of the **local buffer** (not the network stream, which can come back empty and
+silently downgrade a clip to the blurred layout), runs face detection on each, then keeps the
+face that appears in *almost every* frame — that is the streamer's camera, whereas faces in
+the gameplay come and go. Detection retries quickly until the first box is found, then follows
+within `--cam-interval` seconds (default 90). The adopted box is remembered in
+`.clipper/.../cam.json`, so a restart keeps the split layout instead of falling back to blur.
+Detection runs in the background, off the ingest loop.
+
+The box is a **face crop, not the whole webcam inset**: the face is placed in the upper part
+of the band with a little room under the chin, and the box is shrunk rather than slid when
+the camera sits against a frame edge (a bottom-corner cam used to produce a crop that was
+mostly the gameplay above the head). A band stretched more than ~2x gets a light `unsharp`
+pass so a small webcam does not look mushy next to crisp gameplay.
 
 ```bash
 clipper frame -i https://twitch.tv/xqc     # see the detected box drawn on a frame
@@ -159,7 +167,8 @@ clipper frame -i https://twitch.tv/xqc     # see the detected box drawn on a fra
 
 `clipper frame` also prints the box to copy into a fixed `--cam x:y:w:h`, which always
 overrides detection. Detection needs macOS (Vision); if it is unavailable, or no face is
-found, pin the box with `--cam` or the clip falls back to the blurred layout.
+found, pin the box with `--cam` or the clip falls back to the blurred layout — and the worker
+log says so explicitly instead of quietly producing a blurred clip.
 
 ### Hook captions
 
@@ -200,6 +209,7 @@ skipped when it is not.
 ```bash
 python3 -m clipper models --get medium.en  # one-off ~1.5GB whisper.cpp model (best)
 python3 -m clipper models --get vad        # ~0.9MB VAD model: speech timing + no-fake-text gate
+python3 -m clipper models --get tdrz       # optional ~465MB: speaker-turn fallback when no cam
 python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc --layout blur
 
 --subs auto          # default: on if a model is found, else off
@@ -256,6 +266,8 @@ Accuracy matters more than latency here, and clipper leans that way:
     decode invented. Words that land inside a VAD silence are dropped too.
   When the plain pass misses far more speech than VAD heard, clipper uses VAD's transcript
   and estimates word timings inside its segments.
+- **Only the streamer's voice** (see below). Stream audio is one mix, so whisper happily
+  captions the game's dialogue. The webcam settles who is actually speaking.
 - **`--subs-prompt` biases the decoder** toward a streamer's name, game and recurring
   slang. Keep it short and noun-heavy — long phrase lists get echoed back on noisy audio.
   **Auto configure** fills this in per streamer.
@@ -263,6 +275,31 @@ Accuracy matters more than latency here, and clipper leans that way:
   by default, so the desktop, the browser and the ingest keep running while a clip
   transcribes. Override with `--subs-threads N` (`0` = auto, negative = all cores) when
   the box is otherwise idle and you want each clip finished sooner.
+
+### Only the streamer's voice
+
+A stream is a single mixed track: the microphone, the game, music. Whisper has no idea who
+is speaking, so a clip of a streamer watching a cutscene used to come out captioned with the
+*cutscene's* dialogue. There is no second audio track to separate, so clipper uses the
+camera:
+
+- **The mouth is the signal.** While the clip is being cut, the detected webcam crop is
+  sampled six times a second and Vision measures the lip height/width ratio on each frame.
+  The threshold follows a rolling median of the clip itself (cameras differ wildly), needs
+  two consecutive frames in each direction, and merges gaps shorter than 0.3 s.
+- **Words spoken while the mouth is still are dropped.** That removes the game's dialogue
+  and keeps the streamer's reactions, which is the whole point. If the mouth never moves,
+  the clip gets no captions rather than somebody else's lines.
+- **It never guesses.** If the face is missing in more than ~45% of frames, the landmarks
+  are unusable, or no webcam was detected, the transcript is left untouched — wrong-speaker
+  captions beat a clip with the streamer's own words deleted.
+- **Fallback: speaker turns.** With no webcam, clipper can use whisper.cpp's tinydiarize
+  (`clipper models --get tdrz`) to label speaker turns and keep the speaker talking around
+  the clip trigger, where chat reacted. It needs a real two-speaker structure; on a solo
+  stream it hears one speaker and changes nothing.
+
+The result is logged per clip (`caption gate: kept 12/31 word(s)`) and recorded in the
+sidecar's `subtitles.engine` string.
 
 ### How they look
 

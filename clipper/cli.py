@@ -316,12 +316,15 @@ def cmd_models(args: argparse.Namespace) -> int:
     print(f"  model:     {model or 'none found'}")
     vad = transcribe.find_vad_model()
     print(f"  vad:       {vad or 'not found (optional, big accuracy win — clipper models --get vad)'}")
+    tdrz = transcribe.find_tdrz_model()
+    print(f"  turns:     {tdrz or 'not found (optional: speaker fallback when no webcam — clipper models --get tdrz)'}")
     print(f"  searched:  {', '.join(str(d) for d in transcribe.MODEL_DIRS)}")
     if model and "tiny" in model.name:
         print("\n  accuracy tip: base.en / small.en / medium.en are noticeably better on names and slang")
         print("                clipper models --get medium.en")
     print("\n  fetch a model:  clipper models --get medium.en")
     print("  fetch the VAD:  clipper models --get vad")
+    print("  fetch turns:    clipper models --get tdrz")
     return 0
 
 

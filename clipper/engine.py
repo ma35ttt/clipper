@@ -18,7 +18,7 @@ from . import __version__
 from . import profile
 from .audio import LoudnessAnalyzer
 from .chat import ChatEvent, make_chat, normalize_channel, parse_target
-from .config import Config
+from .config import Config, parse_cam
 from .cutter import Cutter, clip_filename, pick_title
 from .dashboard import Dashboard
 from .hls import HLSBuffer
@@ -28,6 +28,14 @@ from .streams import StreamManager, derive_target
 from .util import FFMPEG, fmt_clock, probe, safe_name, tail_file
 
 REMOTE = re.compile(r"^(https?|rtmp|rtmps|rtsp|srt|udp|tcp)://", re.I)
+
+
+def word_count(cues) -> int:
+    """Words in a transcript, preferring whisper's token timings when present."""
+    words = getattr(cues, "words", None) or []
+    if words:
+        return len(words)
+    return sum(len(getattr(cue, "text", "").split()) for cue in cues or [])
 
 
 @dataclass
@@ -103,14 +111,20 @@ class _CamWatcher(threading.Thread):
     def run(self) -> None:
         from . import camera
 
+        # Until the first box is found, retry quickly: a clip rendered in the
+        # meantime falls back to the blurred frame, which is not what the split
+        # layout promises. Once a box exists, follow slower — it rarely moves.
+        found = False
         while not self._stop.is_set():
             url = self.engine.cam_source()
             if url:
                 box = camera.detect(url, self.engine.cfg.work_dir,
                                     log=self.engine.log)
                 if box:
+                    found = True
                     self.engine.adopt_cam(box)
-            if self._stop.wait(self.interval):
+            wait = self.interval if found else min(10.0, self.interval)
+            if self._stop.wait(wait):
                 return
 
 
@@ -138,6 +152,7 @@ class Engine:
         self._verify_worker: _Verifier | None = None
         self._cam_watcher: _CamWatcher | None = None
         self._verify_on = False
+        self._warned_no_cam = False
         self._verify_pending = False
         self._last_verify = 0.0
         self._excerpt: list[tuple[float, str, str]] = []
@@ -194,6 +209,7 @@ class Engine:
             return self._run_console()
         self._prepare_dirs()
         self._maybe_load_profile()
+        self._load_cam()
         self._start_ingest()
         try:
             self._wait_for_buffer()
@@ -653,7 +669,7 @@ class Engine:
 
     def _start_cam_watch(self) -> None:
         """Start following the streamer's webcam when --cam auto is in force."""
-        if getattr(self.cfg, "cam", "auto") != "auto" or self.cfg.layout != "split":
+        if self._cam_setting != "auto" or self.cfg.layout != "split":
             return
         from . import camera
 
@@ -667,6 +683,19 @@ class Engine:
         self.log("camera detection on — following the streamer's webcam")
 
     def cam_source(self) -> str | None:
+        """What detection should read: the local buffer, not the live URL.
+
+        Reading the network stream a second time fights the ingest for
+        bandwidth, and on some CDNs it returns an empty body — which is exactly
+        how a split clip silently became a blurred frame. The local HLS buffer
+        holds the same frames, already downloaded.
+        """
+        playlist = self.hls_dir / "index.m3u8"
+        try:
+            if playlist.exists() and len(self.buf.segments) >= 2:
+                return str(playlist)
+        except OSError:
+            pass
         return self._stream_url or None
 
     def adopt_cam(self, box: tuple[int, int, int, int]) -> None:
@@ -676,6 +705,34 @@ class Engine:
         if spec != self.cfg.cam:
             self.cfg.cam = spec
             self.log(f"camera box → {spec}")
+        self._save_cam(spec)
+
+    def _cam_cache_path(self) -> Path:
+        return self.cfg.work_dir / "cam.json"
+
+    def _save_cam(self, spec: str) -> None:
+        """Remember the box so a restart does not go back to the blurred frame."""
+        try:
+            self._cam_cache_path().write_text(
+                json.dumps({"cam": spec, "at": time.time()}) + "\n",
+                encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_cam(self) -> None:
+        if self._cam_setting != "auto" or getattr(self.cfg, "cam", "auto") != "auto":
+            return
+        try:
+            data = json.loads(self._cam_cache_path().read_text())
+            spec = str(data.get("cam") or "")
+        except (OSError, ValueError, AttributeError):
+            return
+        try:
+            parse_cam(spec)
+        except ValueError:
+            return
+        self.cfg.cam = spec
+        self.log(f"camera box restored from the last run → {spec}")
 
     def _start_verify(self) -> None:
         from . import transcribe
@@ -946,43 +1003,96 @@ class Engine:
 
     def _render(self, prepared, meta: dict, subtitles: bool = False) -> None:
         cues: list = []
-        if subtitles:
-            cues, note = self.cutter.transcribe(prepared)
-            if cues:
-                self.log(f"subtitles — {len(cues)} cue(s) via {note}")
-                meta["subtitles"] = {"engine": note, "cues": len(cues)}
-                meta["transcript"] = " ".join(cue.text for cue in cues)
-            else:
-                self.log(f"no subtitles for this clip: {note}")
-                meta["subtitles"] = {"engine": note, "cues": 0}
-        # The hook only knows what the clip is about once the transcript and chat
-        # excerpt exist: a repeated chat phrase wins, then a quotable line.
-        meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
-                                   meta.get("chat_excerpt", []))
-        name = clip_filename(self.channel, meta["score"], meta.get("stamp"))
-        out = self.cfg.out_dir / name
-        index = 2
-        while out.exists():
-            out = self.cfg.out_dir / f"{Path(name).stem}-{index}{Path(name).suffix}"
-            index += 1
-        ok, error, warning = self.cutter.render(prepared, out, meta.get("title", ""), cues)
-        if not ok:
-            self.log(f"render failed: {error[-300:]}")
-            return
-        if warning:
-            self.log(f"warning: {warning}")
-            meta["render_warning"] = warning
-        info = probe(out)
-        meta.update({
-            "file": out.name,
-            "duration_s": round(info.get("duration") or meta["duration_s"], 2),
-            "width": info.get("width"),
-            "height": info.get("height"),
-        })
+        focus: float | None = None
         try:
-            out.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-        except OSError:
-            pass
+            if self.cfg.layout == "split" and not self.cutter.cam_spec() \
+                    and not self._warned_no_cam:
+                self._warned_no_cam = True
+                self.log("no webcam box — this clip uses the blurred frame instead "
+                         "of the split layout (camera detection has not found a face)")
+            if subtitles:
+                try:
+                    focus = (float(meta["signals"]["t"])
+                             - float(meta["stream_start"]))
+                except (KeyError, TypeError, ValueError):
+                    focus = None
+                cues, note = self.cutter.transcribe(prepared, focus=focus,
+                                                    log=self.log)
+                if cues:
+                    self.log(f"subtitles — {word_count(cues)} word(s) via {note}")
+                    meta["subtitles"] = {"engine": note, "cues": len(cues)}
+                    meta["transcript"] = " ".join(cue.text for cue in cues)
+                else:
+                    self.log(f"no subtitles for this clip: {note}")
+                    meta["subtitles"] = {"engine": note, "cues": 0}
+            # The hook only knows what the clip is about once the transcript and
+            # chat excerpt exist: a repeated chat phrase wins, then a quotable line.
+            cam = self.cutter.cam_spec()
+            meta["cam"] = cam or "none"
+            meta["layout_used"] = ("split" if (self.cfg.layout == "split" and cam)
+                                   else "blur" if self.cfg.layout == "split"
+                                   else self.cfg.layout)
+            meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
+                                       meta.get("chat_excerpt", []))
+            name = clip_filename(self.channel, meta["score"], meta.get("stamp"))
+            out = self.cfg.out_dir / name
+            index = 2
+            while out.exists():
+                out = self.cfg.out_dir / f"{Path(name).stem}-{index}{Path(name).suffix}"
+                index += 1
+            ok, error, warning = self.cutter.render(
+                prepared, out, meta.get("title", ""), cues)
+            if not ok:
+                self.log(f"render failed: {error[-300:]}")
+                return
+            if warning:
+                self.log(f"warning: {warning}")
+                meta["render_warning"] = warning
+
+            # Second opinion. The live copy of the buffer is occasionally silent
+            # or truncated, and whisper then invents a few words. The finished
+            # file has the audio the viewer will hear, so if the transcript is
+            # suspiciously thin, listen to that instead and re-render once.
+            if subtitles and not warning and self._thin_transcript(cues, meta) \
+                    and "caption gate" not in str(meta.get("subtitles", {}).get("engine", "")):
+                better, note2 = self.cutter.transcribe_rendered(
+                    out, prepared, focus=focus, log=self.log)
+                if word_count(better) > word_count(cues):
+                    self.log(f"re-transcribed from the saved clip — "
+                             f"{word_count(better)} word(s)")
+                    cues = better
+                    meta["subtitles"] = {"engine": note2 + " · from the saved clip",
+                                         "cues": len(better)}
+                    meta["transcript"] = " ".join(cue.text for cue in cues)
+                    meta["title"] = pick_title(self.cfg, meta.get("signals", {}),
+                                               cues, meta.get("chat_excerpt", []))
+                    again, err2, _ = self.cutter.render(
+                        prepared, out, meta.get("title", ""), cues)
+                    if not again:
+                        self.log(f"re-render with the corrected transcript failed: "
+                                 f"{err2[-200:]}")
+
+            info = probe(out)
+            meta.update({
+                "file": out.name,
+                "duration_s": round(info.get("duration") or meta["duration_s"], 2),
+                "width": info.get("width"),
+                "height": info.get("height"),
+            })
+            try:
+                out.with_suffix(".json").write_text(json.dumps(meta, indent=2),
+                                                    encoding="utf-8")
+            except OSError:
+                pass
+        finally:
+            shutil.rmtree(prepared.work, ignore_errors=True)
+
+    def _thin_transcript(self, cues, meta: dict) -> bool:
+        """True when a clip is long enough to expect more words than it got."""
+        duration = float(meta.get("duration_s") or 0.0)
+        if duration < 6.0:
+            return False
+        return word_count(cues) < max(2.0, duration / 6.0)
         self._clip_count += 1
         self.log(f"clip saved → {out}  ({meta['duration_s']}s, score {meta['score']:.2f})")
 

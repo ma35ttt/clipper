@@ -174,6 +174,22 @@ def find_vad_model() -> Path | None:
     return None
 
 
+def find_tdrz_model() -> Path | None:
+    """A tinydiarize model, used only when the webcam cannot gate captions."""
+    for directory in MODEL_DIRS:
+        try:
+            matches = sorted(directory.glob("ggml-*-tdrz.bin"))
+        except OSError:
+            continue
+        for path in matches:
+            try:
+                if path.is_file() and path.stat().st_size > 100 * 1024 * 1024:
+                    return path.resolve()
+            except OSError:
+                continue
+    return None
+
+
 def status(explicit_model: str | None = None) -> tuple[bool, str]:
     """(ready, human description). Never raises."""
     if whisper_binary():
@@ -744,6 +760,8 @@ def _run_python(module: str, wav: Path, language: str) -> tuple[list[Cue], str]:
 
 MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{name}"
 VAD_URL = "https://huggingface.co/ggml-org/whisper-vad/resolve/main/{name}"
+TDRZ_URL = ("https://huggingface.co/akashmjn/tinydiarize-whisper.cpp/resolve/main/"
+            "{name}")
 
 ALIASES = {
     "tiny": "ggml-tiny.bin",
@@ -755,6 +773,8 @@ ALIASES = {
     "medium": "ggml-medium.bin",
     "medium.en": "ggml-medium.en.bin",
     "vad": "ggml-silero-v5.1.2.bin",
+    "tdrz": "ggml-small.en-tdrz.bin",
+    "diarize": "ggml-small.en-tdrz.bin",
 }
 
 
@@ -771,7 +791,9 @@ def download(name: str, dest_dir: Path | None = None) -> Path:
 
     import urllib.request
 
-    url = (VAD_URL if filename.startswith("ggml-silero") else MODEL_URL).format(name=filename)
+    url = (VAD_URL if filename.startswith("ggml-silero")
+           else TDRZ_URL if filename.endswith("-tdrz.bin")
+           else MODEL_URL).format(name=filename)
     tmp = target.with_suffix(".part")
     print(f"  downloading {filename} ...", flush=True)
     with urllib.request.urlopen(url, timeout=120) as response, open(tmp, "wb") as fh:
