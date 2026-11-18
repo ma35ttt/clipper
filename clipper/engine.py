@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import __version__
+from . import edit as edit_mod
 from . import profile
+from . import voice as voice_mod
 from .audio import LoudnessAnalyzer
 from .chat import ChatEvent, make_chat, normalize_channel, parse_target
 from .config import Config, parse_cam
@@ -1010,7 +1012,13 @@ class Engine:
                 self._warned_no_cam = True
                 self.log("no webcam box — this clip uses the blurred frame instead "
                          "of the split layout (camera detection has not found a face)")
-            if subtitles:
+            # The cold open and the voiceover need words even when the clip
+            # is not burning captions, so transcribe for them too, then keep
+            # the transcript out of the render when subtitles are off.
+            wants_words = (getattr(self.cfg, "edit_mode", "off") == "coldopen"
+                           or getattr(self.cfg, "voice", "off") == "on")
+            cues, focus = [], None
+            if subtitles or wants_words:
                 try:
                     focus = (float(meta["signals"]["t"])
                              - float(meta["stream_start"]))
@@ -1019,12 +1027,41 @@ class Engine:
                 cues, note = self.cutter.transcribe(prepared, focus=focus,
                                                     log=self.log)
                 if cues:
-                    self.log(f"subtitles — {word_count(cues)} word(s) via {note}")
-                    meta["subtitles"] = {"engine": note, "cues": len(cues)}
                     meta["transcript"] = " ".join(cue.text for cue in cues)
-                else:
+                    if subtitles:
+                        self.log(f"subtitles — {word_count(cues)} word(s) "
+                                 f"via {note}")
+                        meta["subtitles"] = {"engine": note, "cues": len(cues)}
+                elif subtitles:
                     self.log(f"no subtitles for this clip: {note}")
                     meta["subtitles"] = {"engine": note, "cues": 0}
+                elif wants_words:
+                    self.log(f"no transcript to edit or narrate: {note}")
+            # Rung 1: tease the payoff, then rewind and play the clip. The
+            # transcript is rebuilt on the new timeline so the captions still
+            # land on the words. Fails soft: the original order is kept.
+            if getattr(self.cfg, "edit_mode", "off") == "coldopen":
+                plan = edit_mod.plan(cues, focus=focus,
+                                     duration=prepared.duration)
+                if plan is None:
+                    self.log("edit: no cold open for this clip "
+                             "(too short, or no clear payoff)")
+                    meta["edit"] = {"mode": "coldopen", "applied": False}
+                else:
+                    edited = edit_mod.assemble(prepared, plan,
+                                               encoder=self.cutter.encoder,
+                                               log=self.log)
+                    if edited is None:
+                        meta["edit"] = {"mode": "coldopen", "applied": False}
+                    else:
+                        cues = edit_mod.retime(cues, plan)
+                        prepared = edited
+                        if focus is not None:
+                            focus = plan.cold_len + focus   # the trigger moved
+                        meta["duration_s"] = round(edited.duration, 2)
+                        meta["edit"] = {"mode": "coldopen", "applied": True,
+                                        "payoff": list(plan.payoff),
+                                        "added_s": round(plan.cold_len, 2)}
             # The hook only knows what the clip is about once the transcript and
             # chat excerpt exist: a repeated chat phrase wins, then a quotable line.
             cam = self.cutter.cam_spec()
@@ -1041,7 +1078,8 @@ class Engine:
                 out = self.cfg.out_dir / f"{Path(name).stem}-{index}{Path(name).suffix}"
                 index += 1
             ok, error, warning = self.cutter.render(
-                prepared, out, meta.get("title", ""), cues)
+                prepared, out, meta.get("title", ""),
+                cues if subtitles else [])
             if not ok:
                 self.log(f"render failed: {error[-300:]}")
                 return
@@ -1067,10 +1105,17 @@ class Engine:
                     meta["title"] = pick_title(self.cfg, meta.get("signals", {}),
                                                cues, meta.get("chat_excerpt", []))
                     again, err2, _ = self.cutter.render(
-                        prepared, out, meta.get("title", ""), cues)
+                        prepared, out, meta.get("title", ""),
+                        cues if subtitles else [])
                     if not again:
                         self.log(f"re-render with the corrected transcript failed: "
                                  f"{err2[-200:]}")
+
+            # Rung 2: a short factual intro in a synthetic voice, mixed over a
+            # ducked copy of the clip. The video is stream-copied, so this is
+            # one audio encode. Any failure keeps the un-narrated render.
+            if getattr(self.cfg, "voice", "off") == "on":
+                self._add_voiceover(out, cues, meta)
 
             info = probe(out)
             meta.update({
@@ -1086,6 +1131,37 @@ class Engine:
                 pass
         finally:
             shutil.rmtree(prepared.work, ignore_errors=True)
+
+    def _add_voiceover(self, out: Path, cues, meta: dict) -> None:
+        """Narrate a short, factual intro over the clip, in place."""
+        longest = float(getattr(self.cfg, "voice_max", 10.0) or 10.0)
+        script = voice_mod.script_for(
+            self.channel, cues, meta.get("chat_excerpt", []),
+            max_words=max(6, int(longest * 2.6)))
+        if not script:
+            self.log("voice: nothing factual to say about this clip — skipped")
+            meta["voiceover"] = {"engine": "", "script": ""}
+            return
+        wav = (self.cfg.work_dir / "tmp"
+               / f"voice_{int(time.time() * 1000)}.wav")
+        try:
+            path, engine = voice_mod.speak(
+                script, wav, getattr(self.cfg, "voice_name", "") or None,
+                log=self.log)
+            if path is None:
+                self.log(f"voice: {engine}")
+                meta["voiceover"] = {"engine": "", "script": script}
+                return
+            mixed = voice_mod.mix(out, path, out, log=self.log)
+            meta["voiceover"] = {"engine": engine if mixed else "",
+                                 "script": script, "mixed": mixed}
+            if mixed:
+                self.log(f"voice: {engine} · {script}")
+        finally:
+            try:
+                wav.unlink()
+            except OSError:
+                pass
 
     def _thin_transcript(self, cues, meta: dict) -> bool:
         """True when a clip is long enough to expect more words than it got."""

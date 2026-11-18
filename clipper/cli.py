@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .chat import parse_target
-from .config import DEFAULT_CAM, LAYOUTS, PRESETS, SUBS_MODES, SUBS_STYLES, TITLE_MODES, VERIFY_MODES, Config, apply_preset, parse_cam
+from .config import DEFAULT_CAM, EDIT_MODES, LAYOUTS, PRESETS, SUBS_MODES, SUBS_STYLES, TITLE_MODES, VERIFY_MODES, VOICE_MODES, Config, apply_preset, parse_cam
 from .util import FFMPEG, FFPROBE, find_font, fmt_bytes, fmt_clock, have, run
 
 BANNER = r"""
@@ -69,6 +69,16 @@ def _add_run_args(p: argparse.ArgumentParser, include_source: bool = True) -> No
                         "(default: auto — on when a whisper model is present)")
     p.add_argument("--verify-interval", type=float,
                    help="minimum seconds between verifications (default: 15)")
+    p.add_argument("--edit", choices=EDIT_MODES,
+                   help="restructure before rendering: 'coldopen' teases the payoff, "
+                        "then replays the clip from the start")
+    p.add_argument("--voice", choices=VOICE_MODES,
+                   help="burn a short, factual voiceover over a ducked clip "
+                        "(default: off)")
+    p.add_argument("--voice-max", type=float,
+                   help="longest voiceover to allow, in seconds (default: 10)")
+    p.add_argument("--voice-name",
+                   help="piper voice path or system voice name (default: auto)")
     p.add_argument("--encoder", help="video encoder: auto | libx264 | h264_videotoolbox")
     p.add_argument("--encoder-preset", help="x264 preset (default: veryfast)")
     p.add_argument("--crf", type=int, help="x264 quality, lower = better (default: 20)")
@@ -114,6 +124,10 @@ def _config_from_args(args: argparse.Namespace) -> Config:
         "subs_threads": args.subs_threads,
         "verify": args.verify,
         "verify_interval": args.verify_interval,
+        "edit_mode": getattr(args, "edit", None),
+        "voice": getattr(args, "voice", None),
+        "voice_max": getattr(args, "voice_max", None),
+        "voice_name": getattr(args, "voice_name", None),
         "encoder": args.encoder,
         "preset": args.encoder_preset,
         "crf": args.crf,
@@ -225,6 +239,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     ready, detail = transcribe.status()
     rows.append(("subtitles", detail, ready))
 
+    from . import voice as voice_mod
+
+    voice_engine, voice_detail = voice_mod.engine_name()
+    rows.append(("voiceover", voice_detail, bool(voice_engine)))
+
     target = Path(args.out)
     try:
         target.mkdir(parents=True, exist_ok=True)
@@ -276,6 +295,8 @@ def _forward_args(args: argparse.Namespace) -> list[str]:
         ("--subs-prompt", args.subs_prompt),
         ("--subs-threads", args.subs_threads),
         ("--verify", args.verify), ("--verify-interval", args.verify_interval),
+        ("--edit", args.edit), ("--voice", args.voice),
+        ("--voice-max", args.voice_max), ("--voice-name", args.voice_name),
         ("--encoder", args.encoder), ("--encoder-preset", args.encoder_preset),
         ("--crf", args.crf), ("--segment-time", args.segment_time),
         ("--speed", args.speed),
@@ -295,8 +316,40 @@ def _forward_args(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def cmd_pack(args: argparse.Namespace) -> int:
+    from . import pack
+
+    target = Path(args.out)
+    path, rows = pack.build(target, args.channel)
+    if not rows:
+        print(f"no clips with metadata in {target.resolve()}")
+        return 1
+    print(f"  {rows} clip(s) → {path}")
+    print("  fill the posted column as you upload; the rest is already written")
+    return 0
+
+
 def cmd_models(args: argparse.Namespace) -> int:
     from . import transcribe
+    from . import voice as voice_mod
+
+    if args.get in ("voice", "piper"):
+        try:
+            files = voice_mod.download(Path(args.dir) / "piper")
+        except Exception as exc:  # noqa: BLE001 - network is unreliable by nature
+            print(f"error: could not download the voice: {exc}")
+            return 1
+        for item in files:
+            print(f"  voice → {item}")
+        engine, detail = voice_mod.engine_name()
+        print(f"  engine:    {detail}")
+        if not voice_mod.piper_binary():
+            print("\n  the piper binary itself is still missing:")
+            print("    macOS    brew install piper-tts")
+            print("    Windows  download piper_windows_amd64.zip from")
+            print("             https://github.com/rhasspy/piper/releases")
+            print("             and put piper.exe on PATH")
+        return 0
 
     if args.get:
         try:
@@ -322,6 +375,8 @@ def cmd_models(args: argparse.Namespace) -> int:
     if model and "tiny" in model.name:
         print("\n  accuracy tip: base.en / small.en / medium.en are noticeably better on names and slang")
         print("                clipper models --get medium.en")
+    engine, detail = voice_mod.engine_name()
+    print(f"  voiceover: {detail}")
     print("\n  fetch a model:  clipper models --get medium.en")
     print("  fetch the VAD:  clipper models --get vad")
     print("  fetch turns:    clipper models --get tdrz")
@@ -496,9 +551,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_clips.add_argument("--limit", type=int, default=25)
     p_clips.set_defaults(func=cmd_clips)
 
+    p_pack = sub.add_parser(
+        "pack", help="write a posting queue (CSV) from finished clips")
+    p_pack.add_argument("--out", default="clips", help="where the clips are")
+    p_pack.add_argument("--channel", default="",
+                        help="channel name to use when a sidecar has none")
+    p_pack.set_defaults(func=cmd_pack)
+
     p_models = sub.add_parser("models", help="check or fetch subtitle models")
     p_models.add_argument("--get", metavar="NAME",
-                          help="download a whisper model: tiny.en, base.en, small.en")
+                          help="download a whisper model (tiny.en, base.en, small.en) "
+                               "or 'voice' for the piper narrator")
     p_models.add_argument("--dir", default="models", help="where to store models")
     p_models.add_argument("--model", help="check this model path instead")
     p_models.set_defaults(func=cmd_models)

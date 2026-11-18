@@ -10,6 +10,8 @@ TITLE_MODES = ("auto", "none", "fixed")
 SUBS_MODES = ("auto", "on", "off")
 VERIFY_MODES = ("auto", "on", "off")
 SUBS_STYLES = ("pop", "block")
+EDIT_MODES = ("off", "coldopen")
+VOICE_MODES = ("off", "on")
 
 # Where the streamer's webcam sits inside the source frame, as ``x:y:w:h``.
 # Only the ``split`` layout uses it. ``auto`` (the default) finds it from the
@@ -78,6 +80,14 @@ class Config:
     subs_language: str = "en"
     subs_prompt: str | None = None   # vocabulary bias, e.g. streamer + game names
     subs_threads: int = 0     # 0 = auto (half the cores, capped at 4)
+    # --- edit & voice -----------------------------------------------------
+    # ``coldopen`` teases the payoff, then replays the clip from the start; a
+    # narrated clip gets a short factual intro in a synthetic voice. Both are
+    # off by default: they change the output, not just its quality.
+    edit_mode: str = "off"
+    voice: str = "off"
+    voice_max: float = 10.0   # seconds of narration to allow
+    voice_name: str = ""      # piper voice / system voice; blank = auto
     verify: str = "auto"      # auto | on | off — verify candidates with a fast transcript
     verify_interval: float = 15.0   # minimum seconds between verifications
     verify_window: float = 10.0     # seconds of audio to transcribe per verification
@@ -115,6 +125,13 @@ class Config:
             raise SystemExit(f"error: --subs-style must be one of {', '.join(SUBS_STYLES)}")
         if self.verify not in VERIFY_MODES:
             raise SystemExit(f"error: --verify must be one of {', '.join(VERIFY_MODES)}")
+        if self.edit_mode not in EDIT_MODES:
+            raise SystemExit("error: --edit must be one of "
+                             f"{', '.join(EDIT_MODES)}")
+        if self.voice not in VOICE_MODES:
+            raise SystemExit(f"error: --voice must be one of {', '.join(VOICE_MODES)}")
+        if self.voice_max < 0:
+            raise SystemExit("error: --voice-max must be >= 0")
         if not 0.0 < self.threshold < 1.0:
             raise SystemExit("error: --threshold must be between 0 and 1")
         if self.agree < 0:

@@ -19,9 +19,12 @@ sys.path.insert(0, str(ROOT))
 
 from clipper import caption  # noqa: E402
 from clipper import camera  # noqa: E402
+from clipper import edit  # noqa: E402
+from clipper import pack  # noqa: E402
 from clipper import profile  # noqa: E402
 from clipper import streams  # noqa: E402
 from clipper import transcribe  # noqa: E402
+from clipper import voice  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
 from clipper.cutter import (Cutter, hook_from_chat, hook_from_cues,  # noqa: E402
@@ -722,6 +725,99 @@ class SpeakerGateTest(unittest.TestCase):
             gated, _ = speaker.streamer_only(
                 cues, self._prepared(), "0:0:100:100", None, Path("."))
         self.assertIs(gated, cues)
+
+
+class EditStructureTest(unittest.TestCase):
+    @staticmethod
+    def _cues(duration: float = 16.0) -> "transcribe.Cues":
+        words = [transcribe.Cue(index * 0.6, index * 0.6 + 0.35, f"w{index}")
+                 for index in range(16)]
+        lines = [transcribe.Cue(0.0, duration, " ".join(w.text for w in words))]
+        return transcribe.Cues(lines, words)
+
+    def test_plan_teases_a_middle_payoff_and_leaves_context(self):
+        plan = edit.plan(self._cues(), focus=4.0, duration=16.0)
+        self.assertIsNotNone(plan)
+        low, high = plan.payoff
+        self.assertGreater(low, 2.0)
+        self.assertLess(high, 16.0)
+        self.assertGreater(high - low, 2.0)
+        # The tease and the replay together are longer than the source clip.
+        self.assertGreater(plan.total, 16.0)
+
+    def test_retime_duplicates_the_cold_open_words(self):
+        cues = self._cues()
+        plan = edit.plan(cues, focus=4.0, duration=16.0)
+        retimed = edit.retime(cues, plan)
+        self.assertEqual(len(retimed), 2)          # the line exists twice
+        self.assertGreater(len(retimed.words), len(cues.words))
+        self.assertGreaterEqual(retimed.words[0].start, 0.0)
+        self.assertLess(retimed.words[0].start, plan.cold_len)
+        starts = [word.start for word in retimed.words]
+        self.assertEqual(starts, sorted(starts))
+
+    def test_a_short_clip_gets_no_cold_open(self):
+        self.assertIsNone(edit.plan(self._cues(), focus=2.0, duration=6.0))
+
+    def test_a_payoff_at_the_very_start_is_not_worth_rewinding(self):
+        cues = self._cues()
+        self.assertIsNone(edit.plan(cues, focus=0.2, duration=16.0))
+
+
+class VoiceScriptTest(unittest.TestCase):
+    @staticmethod
+    def _cues(text: str) -> "transcribe.Cues":
+        return transcribe.Cues([transcribe.Cue(0.0, 3.0, text)], [])
+
+    def test_the_line_quotes_what_was_actually_said(self):
+        text = voice.script_for(
+            "ohnepixel", self._cues("Oh, I don't want to sell my car though."), [])
+        self.assertIn("sell my car", text)
+        self.assertIn("ohnepixel", text)
+
+    def test_profanity_is_never_narrated(self):
+        self.assertEqual(
+            voice.script_for("xqc", self._cues("this is fucking crazy"), []), "")
+
+    def test_no_transcript_and_no_chat_means_no_voiceover(self):
+        self.assertEqual(voice.script_for("xqc", [], []), "")
+
+    def test_a_repeated_chat_phrase_can_carry_the_line(self):
+        chat = [{"user": "a", "text": "LOOK AT THE MAP"},
+                {"user": "b", "text": "look at the map"}]
+        text = voice.script_for("jasontheween", [], chat)
+        self.assertIn("look at the map", text.lower())
+
+
+class PostingPackTest(unittest.TestCase):
+    def test_one_row_per_clip_with_a_title_and_hashtags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "clip.mp4").write_bytes(b"x")
+            (root / "clip.json").write_text(json.dumps({
+                "title": "CHAT SAYS LOOK AT THE MAP",
+                "transcript": "look at the map before you jump",
+                "channel": "jasontheween",
+                "duration_s": 27.0,
+                "created_at": "2026-11-18T18:30:00",
+                "chat_excerpt": [{"user": "a", "text": "LOOK AT THE MAP"}],
+            }), encoding="utf-8")
+
+            target, rows = pack.build(root)
+
+            self.assertEqual(rows, 1)
+            text = target.read_text(encoding="utf-8-sig")
+            self.assertIn("jasontheween", text)
+            self.assertIn("#shorts", text)
+            self.assertIn("Chat says look at the map", text)
+
+    def test_sidecars_without_a_clip_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gone.json").write_text("{}", encoding="utf-8")
+            target, rows = pack.build(root)
+            self.assertEqual(rows, 0)
+            self.assertTrue(target.exists())
 
 
 class CutterTest(unittest.TestCase):

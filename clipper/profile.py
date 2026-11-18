@@ -19,8 +19,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 
 from . import __version__
-from .config import (LAYOUTS, SUBS_MODES, SUBS_STYLES, TITLE_MODES,
-                     VERIFY_MODES, Config, parse_cam)
+from .config import (EDIT_MODES, LAYOUTS, SUBS_MODES, SUBS_STYLES,
+                     TITLE_MODES, VERIFY_MODES, VOICE_MODES, Config, parse_cam)
 
 # "Auto" is the do-everything button. It is a bundle of field values rather than
 # a hidden mode, so switching it on simply applies them and switching it off
@@ -111,7 +111,7 @@ class Field:
 
 # Groups render in this order in the console.
 GROUP_ORDER = ("Trigger", "Frame & camera", "Captions", "Verify",
-               "Encoder", "Chat", "Weights")
+               "Edit & voice", "Encoder", "Chat", "Weights")
 
 FIELDS: tuple[Field, ...] = (
     # --- Trigger (how eagerly a moment is clipped) -----------------------
@@ -152,6 +152,17 @@ FIELDS: tuple[Field, ...] = (
     Field("title_mode", "Hook caption", "Captions", "choice", choices=TITLE_MODES),
     Field("title", "Fixed hook text", "Captions", "text",
           note="Used when the hook mode is fixed."),
+
+    # --- Edit & voice ----------------------------------------------------
+    Field("edit_mode", "Edit structure", "Edit & voice", "choice",
+          choices=EDIT_MODES,
+          note="coldopen = play the payoff first, then rewind and play the clip."),
+    Field("voice", "AI voiceover", "Edit & voice", "choice", choices=VOICE_MODES,
+          note="A short factual intro in a synthetic voice, over ducked audio."),
+    Field("voice_max", "Voiceover length", "Edit & voice", "float", 2.0, 20.0, 0.5,
+          unit="s", note="Longest narration to allow; the clip stays the star."),
+    Field("voice_name", "Voice", "Edit & voice", "text", optional=True,
+          note="piper voice path or system voice; blank = best available."),
 
     # --- Verify ----------------------------------------------------------
     Field("verify", "Verify candidates", "Verify", "choice", choices=VERIFY_MODES,
