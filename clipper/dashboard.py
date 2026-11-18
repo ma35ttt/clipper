@@ -1097,14 +1097,34 @@ class Dashboard(threading.Thread):
             "engine": self.engine,
             "clips_dir": self.clips_dir,
         })
-        try:
-            self.httpd = ThreadingHTTPServer(("127.0.0.1", self.port), handler)
-        except OSError as exc:
-            self.engine.log(f"dashboard unavailable on port {self.port}: {exc}")
+        wanted = self.port
+        for port in self._ports_to_try():
+            try:
+                self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)
+            except OSError:
+                self.httpd = None
+                continue
+            self.port = port
+            break
+        if self.httpd is None:
+            self.engine.log(f"dashboard unavailable on port {wanted}: no free port nearby")
             return
+        if self.port != wanted:
+            self.engine.log(f"port {wanted} was busy — dashboard moved to {self.port}")
         self.httpd.daemon_threads = True
         self.engine.log(f"dashboard → http://127.0.0.1:{self.port}")
         self.httpd.serve_forever(poll_interval=0.5)
+
+    def _ports_to_try(self) -> list[int]:
+        """The requested port, then nearby ones when it is the shared default.
+
+        Two clipper runs on one machine would otherwise fight over 8756 and the
+        loser would silently have no console. An explicitly chosen port is
+        respected exactly; only the default walks forward to the next free one.
+        """
+        if self.port != 8756:
+            return [self.port]
+        return list(range(8756, 8766))
 
     def stop(self):
         if self.httpd:

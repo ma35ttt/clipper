@@ -289,6 +289,19 @@ h264_videotoolbox` when running several at once.
 ## Operator console
 
 `--port 8756` (default on) serves a local control panel at `http://127.0.0.1:8756`.
+It binds loopback only, so it is private to the machine running it. Two people on
+different computers each get their own console on their own `8756` with no collision.
+If the default port is already taken on one machine, the second copy moves to the next
+free port (8757, 8758, ...) and says so in its log; `--port 9000` is respected exactly.
+
+Running two copies from the same checkout on one machine also means they share `.clipper`
+and `clips`, which would overwrite buffers and profiles. Give the second one its own
+directories:
+
+```bash
+cd ~/clipper && python3 -m clipper run -i https://twitch.tv/xqc -c twitch:xqc --work .clipper-b --out clips-b
+```
+
 Everything you would otherwise pass as a flag is controllable from the page:
 
 - **Live telemetry** — a hype-score sparkline with the trigger line drawn across it, a

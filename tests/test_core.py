@@ -1029,6 +1029,18 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("autocfg", ids)
         self.assertIn("autoConfigure()", PAGE)
 
+    def test_default_dashboard_port_can_move_but_explicit_does_not(self):
+        from pathlib import Path
+
+        from clipper.dashboard import Dashboard
+
+        default = Dashboard(None, 8756, Path("."))
+        ports = default._ports_to_try()
+        self.assertEqual(ports[0], 8756)
+        self.assertGreater(len(ports), 1)
+        explicit = Dashboard(None, 9000, Path("."))
+        self.assertEqual(explicit._ports_to_try(), [9000])
+
 
 if __name__ == "__main__":
     unittest.main()
