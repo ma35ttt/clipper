@@ -282,6 +282,15 @@ def path_for(work_dir: Path, channel: str) -> Path:
     return Path(work_dir) / "profiles" / f"{name}.json"
 
 
+def _before(version, floor: tuple[int, ...] = (0, 8, 0)) -> bool:
+    """True when a saved profile was written before ``floor``."""
+    try:
+        numbers = tuple(int(part) for part in re.findall(r"\d+", str(version))[:3])
+    except (TypeError, ValueError):
+        return False
+    return 0 < len(numbers) and numbers < floor
+
+
 def load(path: Path) -> dict:
     """Read a saved profile's values. Returns {} when absent or unreadable."""
     try:
@@ -294,7 +303,14 @@ def load(path: Path) -> dict:
     if not isinstance(saved, dict):
         # Tolerate a bare mapping of values.
         saved = data
-    return {k: v for k, v in saved.items() if k in BY_KEY}
+    values = {k: v for k, v in saved.items() if k in BY_KEY}
+    # Profiles written before 0.8.0 pin the old split frame. That was the
+    # default then, not a choice, and split leaves an empty caption band on
+    # clips that carry no burned subtitles. Move them to the reference frame;
+    # anything saved on or after 0.8.0 is left exactly as the user set it.
+    if values.get("layout") == "split" and _before(data.get("clipper_version")):
+        values["layout"] = "duo"
+    return values
 
 
 def save(path: Path, values_map: dict, channel: str = "") -> bool:

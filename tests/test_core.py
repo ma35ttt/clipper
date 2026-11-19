@@ -1113,6 +1113,23 @@ class ProfileTest(unittest.TestCase):
             path.write_text(json.dumps({"threshold": 0.2, "bogus": 1}))
             self.assertEqual(profile.load(path), {"threshold": 0.2})
 
+    def test_old_profiles_leave_the_split_frame(self):
+        # Split was the default before 0.8.0; those saves are not a choice.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.json"
+            path.write_text(json.dumps({
+                "clipper_version": "0.7.1",
+                "values": {"layout": "split", "subs": "on"}}))
+            self.assertEqual(profile.load(path)["layout"], "duo")
+
+    def test_a_split_chosen_after_the_change_is_kept(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "p.json"
+            path.write_text(json.dumps({
+                "clipper_version": "0.8.1",
+                "values": {"layout": "split"}}))
+            self.assertEqual(profile.load(path)["layout"], "split")
+
     def test_auto_bundle_only_names_real_fields(self):
         for key in profile.AUTO:
             self.assertIn(key, profile.BY_KEY)
