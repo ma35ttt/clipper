@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -664,6 +665,35 @@ def drop_degenerate(cues: list[Cue]) -> list[Cue]:
     return out
 
 
+def _speech_lock(timeout: float = 600.0):
+    """One whisper decode at a time, across every worker on this machine.
+
+    Two channels on an 8 GB laptop can both start a medium.en decode in the
+    same second; each process maps the whole model, and macOS then swaps or
+    kills a worker mid-clip. A decode is a few seconds, so queueing behind
+    another clip is much cheaper than that. Released when the handle closes.
+    """
+    try:
+        import fcntl
+    except ImportError:  # Windows: no advisory locks, just decode
+        return None
+    path = Path(os.environ.get("TMPDIR") or "/tmp") / "clipper-speech.lock"
+    try:
+        handle = open(path, "a+")
+    except OSError:
+        return None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return handle
+        except OSError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                return None
+            time.sleep(0.4)
+
+
 def _run_whisper_cpp(binary: str, model: Path, wav: Path, language: str,
                      timeout: float, prompt: str | None = None,
                      threads: int | None = None,
@@ -703,7 +733,12 @@ def _run_whisper_cpp(binary: str, model: Path, wav: Path, language: str,
         cmd += ["--prompt", prompt]
     if vad is not None:
         cmd += ["--vad", "-vm", str(vad)]
-    result = run(cmd, timeout=timeout)
+    lock = _speech_lock()
+    try:
+        result = run(cmd, timeout=timeout)
+    finally:
+        if lock is not None:
+            lock.close()
     if result.returncode != 0 or not srt.exists():
         tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
         return [], [], "whisper.cpp failed: " + " ".join(tail), False

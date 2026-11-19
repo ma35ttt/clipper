@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import transcribe
-from .cutter import Prepared
+from .cutter import Prepared, _render_lock
 from .util import FFMPEG, probe, run
 
 MIN_DURATION = 10.0      # shorter clips have no room for a tease + rewind
@@ -192,26 +192,31 @@ def assemble(prepared: Prepared, edit: EditPlan, encoder: str = "libx264",
     except OSError:
         pass
 
-    for with_audio in (True, False):
-        args = [
-            FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-fflags", "+genpts", "-f", "concat", "-safe", "0",
-            "-i", str(prepared.list_path),
-            "-filter_complex", _graph(edit, prepared.offset, with_audio),
-            "-map", "[vout]",
-        ]
-        if with_audio:
-            args += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
-        args += _intermediate_args(encoder)
-        args += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(media)]
-        result = run(args, timeout=900)
-        if result.returncode == 0 and media.exists():
-            break
-    else:
-        detail = (result.stderr or "").strip().splitlines()
-        log(f"edit: could not restructure the clip — "
-            f"{detail[-1][:160] if detail else 'ffmpeg failed'}")
-        return None
+    lock = _render_lock()
+    try:
+        for with_audio in (True, False):
+            args = [
+                FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-fflags", "+genpts", "-f", "concat", "-safe", "0",
+                "-i", str(prepared.list_path),
+                "-filter_complex", _graph(edit, prepared.offset, with_audio),
+                "-map", "[vout]",
+            ]
+            if with_audio:
+                args += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+            args += _intermediate_args(encoder)
+            args += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", str(media)]
+            result = run(args, timeout=900)
+            if result.returncode == 0 and media.exists():
+                break
+        else:
+            detail = (result.stderr or "").strip().splitlines()
+            log(f"edit: could not restructure the clip — "
+                f"{detail[-1][:160] if detail else 'ffmpeg failed'}")
+            return None
+    finally:
+        if lock is not None:
+            lock.close()
 
     info = probe(media)
     duration = float(info.get("duration") or 0.0)

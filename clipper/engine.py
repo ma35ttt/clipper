@@ -167,6 +167,7 @@ class Engine:
         self._expires_at: float | None = None
         self._restart_count = 0
         self._restart_base = 0.0
+        self._offline = False
         self._source_note = ""
         self._score = {"score": 0.0, "chat": 0.0, "audio": 0.0, "text": 0.0,
                        "chat_rate": 0.0, "keywords": 0, "audio_db": None}
@@ -780,6 +781,9 @@ class Engine:
 
             new_segments = self.buf.poll()
             if new_segments:
+                if self._offline:
+                    self._offline = False
+                    self.log("stream back — media is flowing again")
                 self._queue_audio()
             self._drain_audio()
             self._drain_chat()
@@ -798,7 +802,9 @@ class Engine:
                 continue
 
             self._score = self.signals.score(now)
-            if self._restart_count and now - self._restart_base > 45:
+            # The counter is only forgiven after the new ingest has actually
+            # survived a while; otherwise a dead URL loops forever.
+            if self._restart_count and time.monotonic() - self._restart_base > 45:
                 self._restart_count = 0
             self._write_score_log(now)
             self._maybe_verify(now)
@@ -813,9 +819,18 @@ class Engine:
         if self._stop.is_set():
             return
         self._restart_count += 1
-        if self._restart_count > 6:
-            raise SystemExit("error: stream keeps failing\n" + tail_file(self.log_path, 12))
-        self.log(f"{reason} — restarting ingest ({self._restart_count}/6)")
+        n = self._restart_count
+        # A burst of failures is a bad URL: give up quickly and let the
+        # console say why. A live stream that has gone offline is different:
+        # keep retrying, slowly, so an overnight session survives the gap.
+        if n <= 6:
+            self.log(f"{reason} — restarting ingest ({n}/6)")
+            wait = min(2.0 * n, 10.0)
+        else:
+            self._offline = True
+            if (n - 6) % 5 == 1:
+                self.log(f"{reason} — stream offline; retrying every 60s")
+            wait = 60.0
         if self._ingest is not None and self._ingest.poll() is None:
             self._ingest.terminate()
             try:
@@ -823,14 +838,14 @@ class Engine:
             except subprocess.TimeoutExpired:
                 self._ingest.kill()
         self._ingest = None
-        time.sleep(min(2.0 * self._restart_count, 10.0))
+        time.sleep(wait)
         try:
             self._start_ingest()
         except SystemExit as exc:
             self.log(str(exc))
             self._ingest = None
             return
-        self._restart_base = 0.0
+        self._restart_base = time.monotonic()
 
     # -- queues --------------------------------------------------------
     def _queue_audio(self) -> None:
@@ -1129,6 +1144,11 @@ class Engine:
                                                     encoding="utf-8")
             except OSError:
                 pass
+            self._clip_count += 1
+            self.log(f"clip saved → {out}  "
+                     f"({meta['duration_s']}s, score {meta['score']:.2f})")
+        except Exception as exc:  # a dead render thread loses the clip silently
+            self.log(f"render crashed: {type(exc).__name__}: {exc}")
         finally:
             shutil.rmtree(prepared.work, ignore_errors=True)
 
@@ -1169,8 +1189,6 @@ class Engine:
         if duration < 6.0:
             return False
         return word_count(cues) < max(2.0, duration / 6.0)
-        self._clip_count += 1
-        self.log(f"clip saved → {out}  ({meta['duration_s']}s, score {meta['score']:.2f})")
 
     # -- telemetry -----------------------------------------------------
     def _write_score_log(self, now: float) -> None:
@@ -1193,7 +1211,9 @@ class Engine:
         s = self._score
         filled = int(round(float(s.get("score", 0)) * 10))
         bar = "█" * filled + "·" * (10 - filled)
-        state = "CLIPPING" if self.capture else "armed"
+        state = ("CLIPPING" if self.capture
+                 else "offline" if self._offline
+                 else "armed")
         audio = s.get("audio_db")
         audio_txt = f"{audio:6.1f}dB" if isinstance(audio, (int, float)) else "   —   "
         sig = f"{s.get('agreeing', 0)}/{s.get('required', 1)}"

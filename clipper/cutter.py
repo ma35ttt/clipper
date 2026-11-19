@@ -504,7 +504,13 @@ class Cutter:
             warning = f"{warning} — {reason}"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(tmp_out, out_path)
+        # The scratch render lives under --work, which is usually on the boot
+        # disk; --out may be an external SSD. os.replace/rename cannot cross a
+        # filesystem boundary (EXDEV), so move, which falls back to copy.
+        try:
+            shutil.move(str(tmp_out), str(out_path))
+        except OSError as exc:
+            return False, f"could not write the clip to {out_path.parent}: {exc}", warning
         return True, "", warning
 
     # -- step 2b: subtitles -------------------------------------------------
