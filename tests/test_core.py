@@ -1238,10 +1238,15 @@ class ConsoleTest(unittest.TestCase):
         (out / "dropped.mp4").write_bytes(b"")
         (out / "dropped.json").write_text(json.dumps(
             {"title": "Dropped", "score": 0, "source": "upload"}))
+        (out / "styled.mp4").write_bytes(b"")
+        (out / "styled.json").write_text(json.dumps(
+            {"title": "Dropped", "score": 0, "source": "upload",
+             "styled_from": "dropped.mp4", "style": "story"}))
         rows = {c["file"]: c for c in self.engine.snapshot()["clips"]}
         self.assertTrue(rows["live.mp4"]["capture_only"])
         self.assertFalse(rows["live.mp4"]["uploaded"])
         self.assertTrue(rows["dropped.mp4"]["uploaded"])
+        self.assertFalse(rows["styled.mp4"]["uploaded"])
 
 
 class _ProcStub:

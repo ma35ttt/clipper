@@ -1311,7 +1311,7 @@ function renderWall(clips) {
       <video src="/clips/${encodeURIComponent(c.file)}" controls preload="metadata" playsinline></video>
       <div class="meta">
         <span class="title" title="${esc(c.title)}">${esc(c.title || c.file)}</span>
-        <span class="pill">${c.uploaded || c.capture_only ? 'raw' : esc(c.score)}</span>
+        ${c.styled ? '' : `<span class="pill">${c.uploaded || c.capture_only ? 'raw' : esc(c.score)}</span>`}
       </div>
       <label class="pick">
         ${c.styled ? '<span class="chip">' + esc(c.style || 'styled') + '</span>'

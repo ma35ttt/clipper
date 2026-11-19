@@ -1439,8 +1439,10 @@ class Engine:
                     entry["score"] = int(round(float(data.get("score", 0)) * 100))
                     entry["styled"] = bool(data.get("styled_from"))
                     entry["style"] = data.get("style") or ""
-                    entry["uploaded"] = data.get("source") == "upload"
-                    entry["capture_only"] = bool(data.get("capture_only"))
+                    entry["uploaded"] = (data.get("source") == "upload"
+                                         and not data.get("styled_from"))
+                    entry["capture_only"] = (bool(data.get("capture_only"))
+                                             and not data.get("styled_from"))
                 except (OSError, ValueError):
                     pass
             clips.append(entry)
