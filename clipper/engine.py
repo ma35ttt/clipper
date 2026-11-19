@@ -767,6 +767,9 @@ class Engine:
             from . import transcribe
 
             self.log(f"subtitles requested but unavailable — {transcribe.status()[1]}")
+        else:
+            self.log("captions off — the hook comes from chat"
+                     + (" and the fixed title" if cfg.title_mode == "fixed" else ""))
         while not self._stop.is_set():
             started = time.monotonic()
             if cfg.run_for and started - self._started_at >= cfg.run_for:
@@ -881,8 +884,8 @@ class Engine:
                 return
             self.signals.add_chat(event)
             self._excerpt.append((event.t, event.user, event.text))
-        if len(self._excerpt) > 400:
-            del self._excerpt[:-200]
+        if len(self._excerpt) > 4000:
+            del self._excerpt[:-2000]
 
     def _drain_transcript(self) -> None:
         while True:
@@ -1009,18 +1012,27 @@ class Engine:
             "signals": cap.peak_signals,
             # Filled in by _render, once the transcript exists to quote from.
             "title": "",
-            "chat_excerpt": [
-                {"t": round(t, 1), "user": u, "text": x}
-                for t, u, x in self._excerpt
-                if cap.start <= t <= cap.end
-            ][-14:],
+            "chat_excerpt": [],
             "clipper_version": __version__,
         }
-        self.pool.submit(self._render, prepared, meta, self.cutter.subtitle_enabled())
+        # The hook sees the clip's *whole* chat window, not the trimmed sidecar
+        # copy: a busy IRL chat sends hundreds of messages in twenty seconds,
+        # and a repeated phrase is exactly what a hook is made of.
+        window_chat = [
+            {"t": round(t, 1), "user": u, "text": x}
+            for t, u, x in self._excerpt
+            if cap.start <= t <= cap.end
+        ]
+        meta["chat_excerpt"] = window_chat[-14:]
+        self.pool.submit(self._render, prepared, meta,
+                         self.cutter.subtitle_enabled(), window_chat)
 
-    def _render(self, prepared, meta: dict, subtitles: bool = False) -> None:
+    def _render(self, prepared, meta: dict, subtitles: bool = False,
+                chat_window: list | None = None) -> None:
         cues: list = []
         focus: float | None = None
+        chat_for_hooks = (chat_window if chat_window is not None
+                          else meta.get("chat_excerpt", []))
         try:
             if self.cfg.layout == "split" and not self.cutter.cam_spec() \
                     and not self._warned_no_cam:
@@ -1085,7 +1097,7 @@ class Engine:
                                    else "blur" if self.cfg.layout == "split"
                                    else self.cfg.layout)
             meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
-                                       meta.get("chat_excerpt", []))
+                                       chat_for_hooks)
             name = clip_filename(self.channel, meta["score"], meta.get("stamp"))
             out = self.cfg.out_dir / name
             index = 2
@@ -1118,7 +1130,7 @@ class Engine:
                                          "cues": len(better)}
                     meta["transcript"] = " ".join(cue.text for cue in cues)
                     meta["title"] = pick_title(self.cfg, meta.get("signals", {}),
-                                               cues, meta.get("chat_excerpt", []))
+                                               cues, chat_for_hooks)
                     again, err2, _ = self.cutter.render(
                         prepared, out, meta.get("title", ""),
                         cues if subtitles else [])
