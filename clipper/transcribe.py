@@ -521,6 +521,12 @@ def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
             chunks.append(chunk_cue(current))
             current = []
         current.append(word)
+        # End the chunk on a finished sentence. Without this the next sentence
+        # opens inside the previous caption ("... haystack chat. I"), which
+        # reads like a broken transcript even when the words are right.
+        if len(current) >= 2 and re.search(r"[.!?][\"')\]]*$", word.text):
+            chunks.append(chunk_cue(current))
+            current = []
     if current:
         chunks.append(chunk_cue(current))
 

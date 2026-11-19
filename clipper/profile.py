@@ -26,10 +26,11 @@ from .config import (EDIT_MODES, LAYOUTS, SUBS_MODES, SUBS_STYLES,
 # a hidden mode, so switching it on simply applies them and switching it off
 # hands you back exactly what you had. The numbers mirror the tuned xQc run.
 AUTO = {
-    "layout": "split",
+    "layout": "duo",
     "cam": "auto",
-    # Capture-only: the console finds the webcam and keeps the split frame.
-    # Hooks, captions and punch-ins are applied to chosen clips afterwards.
+    # Capture-only: the console finds the webcam and keeps the vertical frame
+    # (camera band on top, gameplay filling the rest). Hooks, captions and
+    # punch-ins are applied to chosen clips afterwards.
     "subs": "off",
     "subs_style": "pop",
     "title_mode": "none",

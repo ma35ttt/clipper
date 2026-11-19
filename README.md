@@ -12,8 +12,8 @@ Watches a live stream, finds the moments people react to, and cuts them into
 9:16 clips. It runs in realtime off a rolling buffer, so a clip is ready while
 the moment is still happening.
 
-The live default is **capture-only**: find the webcam, keep the split frame, cut
-the clip. No captions, no hook and no editing are burned in while you stream, so
+The live default is **capture-only**: find the webcam, keep the vertical frame
+(camera band on top, gameplay filling the rest), cut the clip. No captions, no hook and no editing are burned in while you stream, so
 a long session stays cheap on an 8 GB laptop. When the session ends, pick the
 clips worth posting and apply captions, a grounded hook and punch-ins in one
 pass. The console does both; the CLI is `clipper style`.
@@ -181,11 +181,11 @@ have two options:
 
   ```bat
   cd %USERPROFILE%\clipper
-  py -3 -m clipper dashboard --open --layout split --cam 1400:40:480:270
+  py -3 -m clipper dashboard --open --layout duo --cam 1400:40:480:270
   ```
 
-You can also type the box into **Webcam box** on the console and the split layout
-switches on immediately.
+You can also type the box into **Webcam box** on the console and the camera
+layouts switch on immediately.
 
 ---
 
@@ -194,7 +194,7 @@ switches on immediately.
 `dashboard` opens a local control panel at <http://127.0.0.1:8756>. It is bound to
 your machine only; nothing is exposed to the network.
 
-- **AUTO** — one button: split frame, webcam follow, capture-only, tuned trigger.
+- **AUTO** — one button: vertical frame, webcam follow, capture-only, tuned trigger.
   Press again and your old settings come back.
 - **Auto configure** — a per-streamer preset with the right names for the speech
   decoder. Still capture-only until you choose captions yourself.
@@ -308,8 +308,9 @@ What a style controls:
 
 - **Captions** — popping chunks, block lines, a held sentence (`static`), one
   huge word at a time (`word`), or off. Burned with libass (`.ass`) when the
-  installed ffmpeg has it, PNG overlays otherwise. Subtitles stay white by
-  default; only `karaoke` colours a stressed word.
+  installed ffmpeg has it, PNG overlays otherwise. `clean` and `hype` shout the
+  chunk in uppercase and light the spoken word in gold as the karaoke beat;
+  the reference looks keep their white sentences.
 - **Placement** — captions can sit at the `top`, `upper`, `middle`, `seam`,
   `lower` or `bottom` of the frame. `seam` is the join between camera and
   gameplay, which moves when the layout changes.
@@ -325,7 +326,7 @@ Built-in looks:
 
 | style | what it does | learned from |
 | --- | --- | --- |
-| `clean` | one punch-in, popping white captions, gold hook | default |
+| `clean` | one punch-in, big uppercase captions with the spoken word lit, gold hook | default |
 | `hype` | three quick punch-ins, harder pacing | default |
 | `cinematic` | block captions, slow push-ins, no hook | default |
 | `podcast` | block captions, no hook, no punch-ins | default |
@@ -520,28 +521,32 @@ The full 14-day plan, title formulas and the reused-content reasoning are in
 ## Layouts
 
 ```bash
---layout split        # default: webcam on top, gameplay, captions below
---layout duo          # webcam on top, gameplay fills below, captions at the seam
+--layout duo          # default: webcam on top, gameplay fills below, no dead band
+--layout split        # webcam on top, gameplay, captions in a dedicated band
 --layout blur         # 9:16, blurred fill behind the full frame
 --layout vertical     # 9:16 centre crop
 --layout horizontal   # leave it 16:9
 ```
+
+`duo` is the default and the reference-reel frame: the webcam gets the top 840 px
+and the gameplay fills the remaining 1080 px edge to edge, with no filler band
+for captions to float in. Captions are drawn over the join, which is where most
+of the reference clips put them. If a style uses `seam` placement, `duo` resolves
+that to y=850 and `split` to y=1380.
 
 `split` stacks three bands into 1080x1920: the webcam across the top, the gameplay
 underneath, and a blurred band below for the captions and the hook. The gameplay
 is cropped away from the webcam side, so the game fills more of the frame and the
 duplicate face is not shown twice.
 
-`duo` is the reference-reel frame: the webcam gets the top 840 px and the gameplay
-fills the remaining 1080 px edge to edge, with no caption band. Captions are
-drawn over the join, which is where most of the reference clips put them. If a
-style uses `seam` placement, `duo` resolves that to y=850 and `split` to y=1380.
-
-The webcam box is a **face crop**: a little room under the chin, and the box
-shrinks rather than slides when the camera is against a frame edge. A band
-stretched more than about 2x gets a light sharpen so a small webcam does not look
-mushy next to crisp gameplay. If no webcam is found, `split` and `duo` fall back
-to the blurred frame and the worker log says so.
+The webcam box is a **face crop**, not the whole panel, so the band is built as a
+window around it: wide enough for the shoulders, with headroom above, which keeps
+the upscale near 2–3x instead of blowing a 230 px face up to 1080. The box shrinks
+rather than slides when the camera is against a frame edge, and it never reaches
+above the detected box into gameplay. A band stretched more than about 2x gets a
+light sharpen so a small webcam does not look mushy next to crisp gameplay. If no
+webcam is found, `split` and `duo` fall back to the blurred frame and the worker
+log says so.
 
 ## Captions
 

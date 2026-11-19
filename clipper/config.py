@@ -14,8 +14,8 @@ EDIT_MODES = ("off", "coldopen")
 VOICE_MODES = ("off", "on")
 
 # Where the streamer's webcam sits inside the source frame, as ``x:y:w:h``.
-# Only the ``split`` layout uses it. ``auto`` (the default) finds it from the
-# video with face detection — see ``clipper/camera.py`` — so it follows the
+# The ``split`` and ``duo`` layouts use it. ``auto`` (the default) finds it from
+# the video with face detection — see ``clipper/camera.py`` — so it follows the
 # streamer when they move the camera. If detection is unavailable, or you pass
 # an explicit box, that box is used instead. This is the measured xQc fallback.
 DEFAULT_CAM = "0:539:367:294"
@@ -69,10 +69,10 @@ class Config:
     # --- output -----------------------------------------------------------
     out_dir: Path = Path("clips")
     work_dir: Path = Path(".clipper")
-    layout: str = "split"
-    cam: str = "auto"          # webcam box x:y:w:h, used by --layout split
+    layout: str = "duo"
+    cam: str = "auto"          # webcam box x:y:w:h, used by --layout split/duo
     cam_interval: float = 90.0  # seconds between automatic camera re-detection
-    # Capture-only is the default: split frame, webcam follow, no burned-in
+    # Capture-only is the default: vertical frame, webcam follow, no burned-in
     # hook or captions. Styling is chosen per clip after the session, so a long
     # live run never spends memory rasterising captions nobody asked for.
     title_mode: str = "none"

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -30,13 +31,15 @@ from clipper import voice  # noqa: E402
 from clipper import vod as vod_mod  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
-from clipper.cutter import (Cutter, caption_anchor_y, chat_reaction,  # noqa: E402
-                            duo_geometry, duo_graph, hook_from_chat,
+from clipper.cutter import (Cutter, cam_window, caption_anchor_y,  # noqa: E402
+                            chat_reaction, duo_geometry, duo_graph,
+                            hook_from_chat,
                             hook_from_cues, hook_keyword, hook_question,
                             pick_title, split_geometry, split_graph)
 from clipper.engine import Engine  # noqa: E402
 from clipper.hls import HLSBuffer, parse_playlist  # noqa: E402
 from clipper.hls import Segment  # noqa: E402
+from clipper.restyle import _generated_title, describe_cues  # noqa: E402
 from clipper.signals import AudioPoint, Signals  # noqa: E402
 
 
@@ -244,6 +247,11 @@ class CaptionTest(unittest.TestCase):
         self.assertIn("main_h*0.765", sub_y)
         self.assertIn("main_h*0.905", hook_y)
 
+    def test_duo_hook_sits_under_the_camera_band(self):
+        # Camera is the top 840/1920 = 0.4375; the hook starts just below it.
+        _, hook_y = caption.overlay_expr("duo", "pop")
+        self.assertEqual(hook_y, "main_h*0.46")
+
     @unittest.skipUnless(caption.has_styled(), "ImageMagick not installed")
     def test_styled_caption_is_a_transparent_rgba_png(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -399,6 +407,15 @@ class PopChunkTest(unittest.TestCase):
         chunks = transcribe.pop_chunks(transcribe.Cues([], words))
         self.assertEqual([c.text for c in chunks], ["BRO LOOK", "MAP"])
         self.assertGreater(chunks[1].start - chunks[0].end, 1.0)
+
+    def test_a_finished_sentence_ends_the_chunk(self):
+        words = [transcribe.Cue(0.0, 0.5, "HAYSTACK"),
+                 transcribe.Cue(0.5, 0.9, "CHAT."),
+                 transcribe.Cue(0.9, 1.1, "I"),
+                 transcribe.Cue(1.1, 1.5, "THINK")]
+        chunks = transcribe.pop_chunks(transcribe.Cues([], words))
+        self.assertEqual([c.text for c in chunks],
+                         ["HAYSTACK CHAT.", "I THINK"])
 
     def test_a_long_word_does_not_hold_the_caption(self):
         words = [transcribe.Cue(0.0, 0.4, "WAIT"),
@@ -561,7 +578,12 @@ class SplitLayoutTest(unittest.TestCase):
 
     def test_split_graph_crops_the_cam_and_stacks_three_bands(self):
         graph = ";".join(split_graph("0:539:367:294"))
-        self.assertIn("crop=367:294:0:539", graph)
+        x, y, w, h = cam_window("0:539:367:294", 1920, 1080,
+                                1080 / split_geometry("0:539:367:294").cam_h)
+        # The face box is widened so the band is face-and-shoulders, not a
+        # 4x blow-up of the nose, and the window stays inside the frame.
+        self.assertGreater(w, 367)
+        self.assertIn(f"crop={w}:{h}:{x}:{y}", graph)
         self.assertIn("vstack=inputs=2", graph)
         # the three bands must add up to a full 1080x1920 frame
         geo = split_geometry("0:539:367:294")
@@ -650,6 +672,14 @@ class SplitLayoutTest(unittest.TestCase):
         cues = [transcribe.Cue(0, 2.0, "Where is the boat going")]
         self.assertEqual(hook_question(cues), "WHERE IS THE BOAT GOING?")
 
+    def test_a_question_split_across_cues_is_kept_whole(self):
+        # Whisper ends a cue on a pause, not on punctuation. Asking for the
+        # hook from one cue alone used to return "WHAT ARE YOU?".
+        cues = [transcribe.Cue(0.0, 1.0, "Mix it up."),
+                transcribe.Cue(1.0, 3.0, "What are you"),
+                transcribe.Cue(3.0, 5.0, "thinking?")]
+        self.assertEqual(hook_question(cues), "WHAT ARE YOU THINKING?")
+
     def test_one_word_chat_consensus_is_the_last_resort(self):
         chat = [{"user": name, "text": "back"}
                 for name in ("a", "b", "c", "d")]
@@ -661,8 +691,9 @@ class SplitLayoutTest(unittest.TestCase):
         chat = [{"user": "a", "text": "BACK"}] * 6
         self.assertEqual(hook_keyword(chat), "")
 
-    def test_split_is_the_default_layout(self):
-        self.assertEqual(Config().layout, "split")
+    def test_duo_is_the_default_layout(self):
+        # No filler band: camera on top, gameplay filling the rest.
+        self.assertEqual(Config().layout, "duo")
 
 
 class CameraTest(unittest.TestCase):
@@ -960,7 +991,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(cfg.verify, "off")
         self.assertEqual(cfg.subs, "off")
         self.assertEqual(cfg.title_mode, "none")
-        self.assertEqual(cfg.layout, "split")
+        self.assertEqual(cfg.layout, "duo")
 
     def test_cam_auto_and_caption_styles_are_valid(self):
         Config(input="x", cam="auto", subs_style="pop").validate()
@@ -1136,7 +1167,7 @@ class ConsoleTest(unittest.TestCase):
         on = self.engine.apply_auto(True)
         self.assertTrue(on["auto"])
         self.assertTrue(self.engine._auto)
-        self.assertEqual(self.cfg.layout, "split")
+        self.assertEqual(self.cfg.layout, "duo")
         self.assertEqual(self.cfg.cam, "auto")
         self.assertEqual(self.cfg.subs, "off")
         off = self.engine.apply_auto(False)
@@ -1827,6 +1858,21 @@ class StyleTest(unittest.TestCase):
         self.assertTrue({"story", "story-karaoke", "meme", "reveal",
                          "karaoke"} <= names)
 
+    def test_a_filename_is_never_a_hook(self):
+        clip = Path("20261119-144743_caseoh_061.mp4")
+        self.assertTrue(_generated_title(clip.stem, clip))
+        self.assertTrue(_generated_title("20261119-144743 casEoh 061", clip))
+        self.assertFalse(_generated_title("CHAT SAYS COOKED", clip))
+
+    def test_the_opening_line_fallback_drops_filler(self):
+        cues = [transcribe.Cue(0.0, 2.0,
+                               "I think like she just I think we go haystack "
+                               "chat.")]
+        line = describe_cues(cues)
+        self.assertTrue(line)
+        self.assertFalse(line.startswith("I THINK LIKE"))
+        self.assertLessEqual(len(line.split()), 7)
+
     def test_unknown_style_falls_back_to_clean(self):
         from clipper import styles
 
@@ -1904,6 +1950,47 @@ class StyleTest(unittest.TestCase):
         self.assertTrue(all(r"\fscx86" in line for line in dialogues))
         self.assertIn(r"\c&H001A7AFF&", dialogues[1])
         self.assertNotIn(r"\c&H001A7AFF&", dialogues[0])
+
+    def test_beat_fill_lights_one_word_at_a_time(self):
+        cues = transcribe.Cues(
+            [transcribe.Cue(0.2, 1.4, "THIS IS IT")],
+            [transcribe.Cue(0.2, 0.6, "THIS"),
+             transcribe.Cue(0.6, 1.0, "IS"),
+             transcribe.Cue(1.0, 1.4, "IT")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "beat.ass"
+            self.assertTrue(caption.build_ass(
+                cues, path, y=1500, mode="pop", uppercase=True,
+                beat_fill="#FFD23F", font_px=120))
+            text = path.read_text()
+        events = text.split("[Events]")[1]
+        dialogues = [line for line in events.splitlines()
+                     if line.startswith("Dialogue:")]
+        # One line per word, so exactly one word is lit at any instant.
+        self.assertEqual(len(dialogues), 3)
+        self.assertTrue(all("&H003FD2FF&" in line for line in dialogues))
+        self.assertLessEqual(dialogues[0].count("&H003FD2FF&"), 1)
+        self.assertIn("THIS", dialogues[0])
+        self.assertIn("IS", dialogues[1])
+
+    def test_a_wide_chunk_shrinks_instead_of_overflowing(self):
+        cues = transcribe.Cues(
+            [transcribe.Cue(0.2, 2.0, "ARE YOU THINKING?")],
+            [transcribe.Cue(0.2, 0.6, "ARE"),
+             transcribe.Cue(0.6, 1.0, "YOU"),
+             transcribe.Cue(1.0, 2.0, "THINKING?")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "wide.ass"
+            self.assertTrue(caption.build_ass(
+                cues, path, y=1500, mode="pop", uppercase=True,
+                font_px=121, max_width=993))
+            text = path.read_text()
+        events = text.split("[Events]")[1]
+        self.assertIn(r"\fs", events)
+        sizes = [int(m) for m in re.findall(r"\\fs(\d+)", events)]
+        self.assertTrue(sizes and all(size < 121 for size in sizes))
 
     def test_story_chunks_group_sentences_and_respect_pauses(self):
         cues = [transcribe.Cue(0.2, 1.4, "this is a long first thought"),

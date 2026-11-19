@@ -803,14 +803,15 @@ def run(cfg: Config, link: str, *, max_clips: int = DEFAULT_CLIPS,
         f"at threshold {cfg.threshold:.2f}; {len(moments)} new this run")
 
     # --- camera -------------------------------------------------------
-    if (not stop() and cfg.layout == "split" and getattr(engine, "_cam_setting", "auto")
-            == "auto" and camera.available()):
+    if (not stop() and cfg.layout in ("split", "duo")
+            and getattr(engine, "_cam_setting", "auto") == "auto"
+            and camera.available()):
         seek = moments[0].t if moments else min(source.duration * 0.25, 1800.0)
         box = camera.detect(source.url, cfg.work_dir, seek=seek, log=log)
         if box:
             engine.adopt_cam(box)
         else:
-            log("vod: no webcam found — split clips will use the blurred frame")
+            log("vod: no webcam found — clips will use the blurred frame")
 
     # --- render -------------------------------------------------------
     if not moments:

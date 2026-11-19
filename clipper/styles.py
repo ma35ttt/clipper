@@ -50,6 +50,8 @@ class Style:
     backend: str = "ass"           # ass | png
     caption_fill: str = "#FFFFFF"
     emphasis_fill: str = "#FFD23F"
+    uppercase: bool = False        # shout the caption, the way the reels do
+    beat_fill: str = ""            # karaoke: words flip to this as they are said
     caption_anchor: str = "auto"   # auto | top | upper | middle | seam | lower | bottom
     caption_size: float = 0.0      # fraction of frame width; 0 = per-mode default
     kicker: bool = False           # static sentence line alongside word captions
@@ -88,9 +90,12 @@ class Style:
 
 
 BUILTINS: tuple[Style, ...] = (
-    Style("clean", "Clean", "One punch-in, popping white captions, gold hook."),
-    Style("hype", "Hype", "Three quick punch-ins; white captions, harder pacing.",
-          punch_count=3, punch_zoom=1.22, punch_len=0.5, category="hype"),
+    Style("clean", "Clean", "One punch-in, big uppercase captions, gold hook.",
+          uppercase=True, beat_fill="#FFD23F", caption_size=0.112,
+          punch_count=1, punch_zoom=1.10, punch_len=0.55),
+    Style("hype", "Hype", "Three quick punch-ins; big uppercase captions, harder pacing.",
+          uppercase=True, beat_fill="#FFD23F", caption_size=0.118,
+          punch_count=3, punch_zoom=1.18, punch_len=0.5, category="hype"),
     Style("cinematic", "Cinematic", "Block captions, slow 1.1x push-ins, no hook.",
           hook=False, captions="block", punch_count=2, punch_zoom=1.10,
           punch_len=0.8, category="montage"),

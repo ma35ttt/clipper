@@ -682,7 +682,8 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
               max_width: int = 980, mode: str = "",
               align: str = "center", uppercase: bool = False,
               colour_emphasis: bool = False, wrap_chars: int = 0,
-              spacing: int = 0, outline_px: int = 5) -> bool:
+              spacing: int = 0, outline_px: int = 5,
+              beat_fill: str = "") -> bool:
     """Write a self-contained ``.ass`` file for libass.
 
     This is the post-session caption backend. It gives per-chunk colour,
@@ -714,6 +715,18 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
     normal = _ass_colour(fill)
     hot = _ass_colour(emphasis_fill)
     border = _ass_colour(outline)
+    # Karaoke: the word being spoken is painted inline in the beat colour, the
+    # rest stay in the resting colour.
+    beat = _ass_colour(beat_fill) if beat_fill else ""
+    primary = normal
+    secondary = hot
+
+    flat_words: list = []
+    if beat:
+        flat_words = list(getattr(cues, "words", ()) or ())
+        if not flat_words:
+            flat_words = transcribe.word_timings(list(cues or ()))
+    cursor = 0
     font = (font or "Arial").strip() or "Arial"
     lines = [
         "[Script Info]",
@@ -728,7 +741,7 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
         " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Pop,{font},{int(font_px)},{normal},{hot},{border},"
+        f"Style: Pop,{font},{int(font_px)},{primary},{secondary},{border},"
         f"&H80000000&,1,0,0,0,100,100,{max(0, int(spacing))},0,1,"
         f"{max(1, int(outline_px))},1,2,"
         f"{int(margin)},{int(margin)},{int(margin)},1",
@@ -772,16 +785,53 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
             text = text.upper()
         words = text.split()
         keys = {re.sub(r"[^a-z0-9]", "", word.lower()) for word in words}
-        colour = hot if (colour_emphasis and wanted and keys & wanted) else ""
+        colour = hot if (colour_emphasis and not beat and wanted and keys & wanted) else ""
         overrides = [anchor, f"\\pos(540,{int(y)})"]
         if colour:
             overrides.append(f"\\c{colour}")
-        if mode in ("pop", "word"):
-            overrides += [r"\fscx86", r"\fscy86", r"\t(0,100,\fscx100\fscy100)"]
-        lines.append(
-            f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Pop,,0,0,0,,"
-            f"{{{''.join(overrides)}}}{wrapped(text)}"
-        )
+        # A short chunk at the base size can still be wider than the safe
+        # width ("ARE YOU THINKING?" is 17 characters). Shave the size for that
+        # line instead of letting libass run it off both edges.
+        size = int(font_px)
+        estimate = len(text) * 0.56 * size
+        if estimate > max_width * 0.96:
+            size = max(48, int(size * max_width * 0.96 / estimate))
+        if size != int(font_px):
+            overrides.append(f"\\fs{size}")
+        body = wrapped(text)
+
+        # One line per word while karaoke is on, so the word being said is the
+        # only one lit. A single \k line would leave every word coloured once
+        # the chunk is over, which reads as a gold sentence, not a beat.
+        events: list[tuple[float, float, str, bool]] = [(cue.start, cue.end, body, True)]
+        if beat and mode in ("pop", "word") and len(flat_words) >= cursor + len(words):
+            take = flat_words[cursor:cursor + len(words)]
+            cursor += len(words)
+            shown_words = [
+                _ass_escape(word.text.upper() if (uppercase or mode == "word")
+                            else word.text)
+                for word in take
+            ]
+            events = []
+            for position, word in enumerate(take):
+                after = (take[position + 1].start if position + 1 < len(take)
+                         else cue.end)
+                begin = max(cue.start, word.start)
+                if after <= begin:
+                    continue
+                lit = list(shown_words)
+                lit[position] = f"{{\\c{beat}}}{lit[position]}{{\\c{normal}}}"
+                events.append((begin, after, " ".join(lit), position == 0))
+
+        for begin, end, line, pop in events:
+            event_overrides = list(overrides)
+            if pop and mode in ("pop", "word"):
+                event_overrides += [r"\fscx86", r"\fscy86",
+                                    r"\t(0,100,\fscx100\fscy100)"]
+            lines.append(
+                f"Dialogue: 0,{_ass_time(begin)},{_ass_time(end)},Pop,,0,0,0,,"
+                f"{{{''.join(event_overrides)}}}{line}"
+            )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")

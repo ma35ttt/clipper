@@ -209,28 +209,32 @@ def hook_question(cues, max_words: int = 8, max_chars: int = 52) -> str:
     the first ``max_words`` words — the extra words are usually a mangled name
     or a trailing aside, and the question still reads.
     """
-    for cue in cues or ():
-        text = re.sub(r"\s+", " ", str(cue.text)).strip()
-        for clause in re.split(r"(?<=[.!?])\s+", text):
-            clause = clause.strip()
-            if len(clause) < 6:
-                continue
-            words = clause.split()
-            if not 3 <= len(words) <= max_words * 2:
-                continue
-            opening = re.sub(r"[^A-Za-z]", "", words[0]).upper()
-            if "?" not in clause and opening not in QUESTION_STARTS:
-                continue
-            if len(words) > max_words:
-                words = words[:max_words]
-                clause = " ".join(words) + "?"
-            clause = " ".join(clause.split())
-            clause = re.sub(r"[^A-Za-z0-9'!? ]+$", "", clause).strip()
-            if not clause.endswith("?"):
-                clause += "?"
-            if len(clause) > max_chars:
-                continue
-            return clause.upper()
+    # Join the cues before splitting into sentences. Whisper ends a cue on a
+    # pause, not on punctuation, so "What are you" and "thinking?" arrive as two
+    # cues and the first one alone would become the hook "WHAT ARE YOU?".
+    text = " ".join(re.sub(r"\s+", " ", str(cue.text)).strip()
+                    for cue in (cues or ()))
+    text = re.sub(r"\s+", " ", text).strip()[:1500]
+    for clause in re.split(r"(?<=[.!?])\s+", text):
+        clause = clause.strip()
+        if len(clause) < 6:
+            continue
+        words = clause.split()
+        if not 3 <= len(words) <= max_words * 2:
+            continue
+        opening = re.sub(r"[^A-Za-z]", "", words[0]).upper()
+        if "?" not in clause and opening not in QUESTION_STARTS:
+            continue
+        if len(words) > max_words:
+            words = words[:max_words]
+            clause = " ".join(words) + "?"
+        clause = " ".join(clause.split())
+        clause = re.sub(r"[^A-Za-z0-9'!? ]+$", "", clause).strip()
+        if not clause.endswith("?"):
+            clause += "?"
+        if len(clause) > max_chars:
+            continue
+        return clause.upper()
     return ""
 
 
@@ -380,6 +384,51 @@ def split_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
 DUO_CAM_H = 840
 DUO_GAME_H = 1080
 
+# The detector reports the face, not the webcam panel. Cropping the face box and
+# stretching it to 1080 wide is a 4-5x upscale of a 230px square: that is the
+# soft, half-a-head, HUD-in-the-corner band that made the first renders look
+# broken. Build a window around the face instead: wide enough that the upscale
+# stays small, tall enough for headroom, and framed so the face sits a little
+# above centre.
+CAM_WINDOW_WIDE = 1.40   # window width as a multiple of the detected box
+CAM_HEADROOM = 0.45      # box centre sits this far down the window
+
+
+def cam_window(cam: str = DEFAULT_CAM, src_w: int = 1920, src_h: int = 1080,
+               aspect: float = 1080 / DUO_CAM_H) -> tuple[int, int, int, int]:
+    """A face-centred crop for the camera band, sized to stay sharp.
+
+    ``cam`` is the box the detector found, which is a tight crop around the
+    face rather than the whole webcam panel. Widening it a little shows the
+    shoulders and the room instead of a face filling the band, and it cuts the
+    upscale that made the first camera bands look soft. The frame is the limit:
+    a cam that already fills the picture is left alone.
+    """
+    src_w = max(16, int(src_w or 1920))
+    src_h = max(16, int(src_h or 1080))
+    try:
+        fx, fy, fw, fh = parse_cam(cam)
+    except ValueError:
+        return (0, 0, src_w, src_h)
+    if fw <= 0 or fh <= 0:
+        return (0, 0, src_w, src_h)
+
+    width = min(fw * CAM_WINDOW_WIDE, src_w)
+    height = min(width / max(0.2, aspect), src_h)
+    width = min(width, height * aspect)
+
+    centre_x = fx + fw / 2
+    centre_y = fy + fh / 2
+    left = centre_x - width / 2
+    top = centre_y - height * CAM_HEADROOM
+    # Do not reach above the detected box: the box already leaves a face height
+    # of headroom, and anything over it is gameplay. A strip of gameplay at the
+    # top of the camera band reads as a broken crop.
+    top = max(top, fy)
+    left = min(max(0.0, left), src_w - width)
+    top = min(max(0.0, top), src_h - height)
+    return (_even(left), _even(top), _even(width), _even(height))
+
 
 def duo_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
                  src_h: int = 1080) -> SplitGeometry:
@@ -399,12 +448,14 @@ def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
     """
     geo = split_geometry(cam, src_w, src_h)
     x, y, w, h = parse_cam(cam)
-    crop = f"crop={w}:{h}:{x}:{y}"
+    wx, wy, ww, wh = cam_window(cam, src_w, src_h,
+                                1080 / max(1, geo.cam_h))
+    crop = f"crop={ww}:{wh}:{wx}:{wy}"
     # A webcam inset is small. Filling a 1080-wide band with it is a big
     # upscale, and soft footage reads as "broken" next to crisp gameplay, so
     # give the face band a little edge back when it is stretched hard.
     sharpen = ""
-    if h > 0 and geo.cam_h / h >= 2.2:
+    if wh > 0 and geo.cam_h / wh >= 1.6:
         sharpen = ",unsharp=5:5:0.8:5:5:0.0"
 
     parts = [
@@ -463,9 +514,11 @@ def duo_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
     """
     geo = duo_geometry(cam, src_w, src_h)
     x, y, w, h = parse_cam(cam)
-    crop = f"crop={w}:{h}:{x}:{y}"
+    wx, wy, ww, wh = cam_window(cam, src_w, src_h,
+                                1080 / max(1, geo.cam_h))
+    crop = f"crop={ww}:{wh}:{wx}:{wy}"
     sharpen = ""
-    if h > 0 and geo.cam_h / h >= 2.2:
+    if wh > 0 and geo.cam_h / wh >= 1.6:
         sharpen = ",unsharp=5:5:0.8:5:5:0.0"
 
     parts = [
@@ -974,8 +1027,8 @@ class Cutter:
         geo = (split_geometry(cam, prepared.width, prepared.height)
                if layout == "split" and not composed else None)
         sub_margin = 64 if vertical else 40
-        sub_ratio = {"pop": 0.095, "block": 0.062, "static": 0.050,
-                     "word": 0.115}.get(caption_mode, 0.062)
+        sub_ratio = {"pop": 0.112, "block": 0.072, "static": 0.058,
+                     "word": 0.120}.get(caption_mode, 0.072)
         sub_estimate = (int(1080 * sub_ratio * 1.7) if vertical else 160)
         game_bottom = (geo.cam_h + geo.game_h) if geo else (1920 if composed else 1920)
 
@@ -1056,6 +1109,10 @@ class Cutter:
                 size = int(1080 * 0.062) if vertical else int(max(320, prepared.height or 720) * 0.072)
                 if geo:
                     y = f"h-{sub_margin + sub_estimate + 24}-text_h"
+                elif layout == "duo":
+                    # Same seam slot the PNG hook uses: under the camera band,
+                    # never across the streamer's face.
+                    y = "h*0.46"
                 elif vertical:
                     y = "h*0.06" if style == "pop" else "h*0.70"
                 else:
@@ -1064,9 +1121,9 @@ class Cutter:
                     f"[{current}]drawtext="
                     f"fontfile='{font}':textfile='{prepared.title_file.resolve().as_posix()}':"
                     f"fontcolor=0xFFD23F:fontsize={size}:line_spacing=8:"
-                    "box=1:boxcolor=black@0.55:boxborderw=26:"
+                    "borderw=5:bordercolor=black@0.95:"
                     f"x=(w-text_w)/2:y={y}:"
-                    "shadowcolor=black@0.65:shadowx=2:shadowy=2[vdraw]"
+                    "shadowcolor=black@0.5:shadowx=3:shadowy=3[vdraw]"
                 )
                 current = "vdraw"
             else:
@@ -1114,9 +1171,9 @@ class Cutter:
                 caption_anchor = "seam"
             ass_y, ass_align = caption_anchor_y(caption_anchor, layout)
         else:
-            # The original look, unchanged for clean/hype/podcast: popping
-            # chunks in the band, block lines a little higher.
-            ass_y, ass_align = (1775 if layout == "split" else 1540), "center"
+            # clean/hype/podcast: popping chunks in the lower third, over the
+            # gameplay in a duo frame and inside the filler band in a split one.
+            ass_y, ass_align = (1730 if layout == "split" else 1502), "center"
         ass_px = caption_px or int(1080 * sub_ratio)
 
         def burn(source: Path, label: str) -> None:
@@ -1143,6 +1200,10 @@ class Cutter:
                 mode=caption_mode,
                 align=ass_align,
                 colour_emphasis=colour_emphasis,
+                uppercase=bool(opts.get("uppercase")),
+                beat_fill=str(opts.get("beat_fill") or ""),
+                outline_px=int(opts.get("caption_outline_px")
+                               or max(5, round(1080 * 0.0068))),
                 max_width=int(1080 * 0.92),
             )
             if drew_ass:

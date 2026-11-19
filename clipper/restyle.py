@@ -107,6 +107,16 @@ def plan_punches(cues, duration: float, style: styles_mod.Style) -> list[dict]:
     return punches
 
 
+def _generated_title(title: str, clip: Path) -> bool:
+    """True when a sidecar title is just the file's own generated name."""
+    text = re.sub(r"\s+", " ", str(title or "")).strip().lower()
+    if not text:
+        return True
+    if text == clip.stem.lower():
+        return True
+    return bool(re.search(r"\d{8}[-_]\d{6}", text))
+
+
 def describe_cues(cues, max_words: int = 7, max_chars: int = 42) -> str:
     """A short descriptive line from the opening words, for a top title.
 
@@ -117,8 +127,12 @@ def describe_cues(cues, max_words: int = 7, max_chars: int = 42) -> str:
     """
     text = " ".join(str(cue.text) for cue in cues or ())
     text = re.sub(r"\s+", " ", text).strip()
-    text = re.sub(r"^(?:oh|bro|yo|like|and|so|um|uh)[ ,]+", "",
-                  text, flags=re.IGNORECASE)
+    # Strip spoken filler from the front, repeatedly: "I think like she just
+    # I think we go haystack" opens with five filler words before the point.
+    filler = (r"(?:oh|bro|yo|like|and|so|um+|uh+|just|man|dude|literally|"
+              r"actually|basically|i mean|i think|you know)")
+    for _ in range(4):
+        text = re.sub(rf"^{filler}\b[ ,]+", "", text, flags=re.IGNORECASE)
     words = text.split()
     if not words:
         return ""
@@ -188,12 +202,15 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
                 hook_cfg.title_mode = "fixed"
             title = pick_title(hook_cfg, meta.get("signals", {}) or {},
                                cues, meta.get("chat_excerpt", []) or [])
-            if not title and style.hook_fallback:
+            if not title:
+                # A live trigger titled the clip from chat, which is better than
+                # a description of the opening line. A dropped file has only
+                # its filename there, which is never a hook.
+                carried = str(meta.get("title") or "").strip()
+                if carried and not _generated_title(carried, clip):
+                    title = carried
+            if not title and (style.hook_fallback or style.hook):
                 title = describe_cues(cues)
-        if style.hook and not title:
-            # A look with no hook stays clean even when the source clip already
-            # carries a title from the live trigger.
-            title = str(meta.get("title") or "")
 
         out = _output_path(clip.parent, clip.stem, style.name)
         captured = str(meta.get("layout_used") or getattr(cfg, "layout", "split"))
@@ -211,6 +228,8 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
             "subs_backend": style.backend,
             "caption_fill": style.caption_fill,
             "emphasis_fill": style.emphasis_fill,
+            "uppercase": style.uppercase,
+            "beat_fill": style.beat_fill,
             "emphasis": emphasis,
             "punchins": punches,
             "hook_fill": style.hook_fill,

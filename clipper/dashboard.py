@@ -1659,9 +1659,9 @@ class _Handler(BaseHTTPRequestHandler):
         # Landscape footage is left alone and anchored as a horizontal frame.
         layout = "horizontal"
         if height >= width:
-            layout = str(getattr(engine.cfg, "layout", "vertical") or "vertical")
+            layout = str(getattr(engine.cfg, "layout", "duo") or "duo")
             if layout not in ("split", "duo", "vertical", "blur"):
-                layout = "vertical"
+                layout = "duo"
         sidecar = {
             "title": title[:80],
             "score": 0,
