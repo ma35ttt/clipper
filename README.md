@@ -1,5 +1,13 @@
 # clipper
 
+<p align="center">
+  <a href="docs/clipper-explainer.mp4"><img src="docs/explainer-preview.gif" alt="Walkthrough: capture live, clip past streams, pick a style, update on Windows" width="880"></a>
+</p>
+
+<p align="center">
+  <a href="docs/clipper-explainer.mp4"><b>54-second walkthrough with narration (MP4)</b></a>
+</p>
+
 Watches a live stream, finds the moments people react to, and cuts them into
 9:16 clips. It runs in realtime off a rolling buffer, so a clip is ready while
 the moment is still happening.
@@ -25,6 +33,9 @@ stream  ->  rolling 4-minute buffer  ->  score the moment (chat + audio)
 ## Windows: start here
 
 You need four things installed once, then one command to run it.
+
+The walkthrough at the top of this page runs through this setup, the live
+capture default, and the update in about a minute.
 
 ### 1. Install Python
 
