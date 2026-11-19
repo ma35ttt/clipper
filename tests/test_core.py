@@ -1229,6 +1229,20 @@ class ConsoleTest(unittest.TestCase):
                     "encoder", "profiles", "profile_saved", "out_dir", "log"):
             self.assertIn(key, snap)
 
+    def test_snapshot_marks_raw_captures_and_drops(self):
+        out = Path(self.cfg.out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "live.mp4").write_bytes(b"")
+        (out / "live.json").write_text(json.dumps(
+            {"title": "", "score": 0.71, "capture_only": True}))
+        (out / "dropped.mp4").write_bytes(b"")
+        (out / "dropped.json").write_text(json.dumps(
+            {"title": "Dropped", "score": 0, "source": "upload"}))
+        rows = {c["file"]: c for c in self.engine.snapshot()["clips"]}
+        self.assertTrue(rows["live.mp4"]["capture_only"])
+        self.assertFalse(rows["live.mp4"]["uploaded"])
+        self.assertTrue(rows["dropped.mp4"]["uploaded"])
+
 
 class _ProcStub:
     """A process handle that starts alive and can be stopped or killed."""

@@ -1429,7 +1429,8 @@ class Engine:
             files = []
         for path in files:
             entry = {"file": path.name, "title": "", "score": 0,
-                     "styled": False, "style": "", "uploaded": False}
+                     "styled": False, "style": "", "uploaded": False,
+                     "capture_only": False}
             side = path.with_suffix(".json")
             if side.exists():
                 try:
@@ -1439,6 +1440,7 @@ class Engine:
                     entry["styled"] = bool(data.get("styled_from"))
                     entry["style"] = data.get("style") or ""
                     entry["uploaded"] = data.get("source") == "upload"
+                    entry["capture_only"] = bool(data.get("capture_only"))
                 except (OSError, ValueError):
                     pass
             clips.append(entry)
