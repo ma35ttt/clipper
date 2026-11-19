@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from clipper import caption  # noqa: E402
 from clipper import camera  # noqa: E402
 from clipper import edit  # noqa: E402
+from clipper import emoji as emoji_mod  # noqa: E402
 from clipper import pack  # noqa: E402
 from clipper import profile  # noqa: E402
 from clipper import streams  # noqa: E402
@@ -27,9 +28,9 @@ from clipper import transcribe  # noqa: E402
 from clipper import voice  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
-from clipper.cutter import (Cutter, hook_from_chat, hook_from_cues,  # noqa: E402
-                            hook_keyword, hook_question, pick_title,
-                            split_geometry, split_graph)
+from clipper.cutter import (Cutter, chat_reaction, hook_from_chat,  # noqa: E402
+                            hook_from_cues, hook_keyword, hook_question,
+                            pick_title, split_geometry, split_graph)
 from clipper.engine import Engine  # noqa: E402
 from clipper.hls import HLSBuffer, parse_playlist  # noqa: E402
 from clipper.hls import Segment  # noqa: E402
@@ -253,6 +254,64 @@ class CaptionTest(unittest.TestCase):
             self.assertTrue(data.startswith(b"\x89PNG"))
             # IHDR byte 25 is the colour type; 6 == truecolour with alpha.
             self.assertEqual(data[25], 6)
+
+
+class EmojiTest(unittest.TestCase):
+    def test_emoji_are_detected_and_split_into_runs(self):
+        self.assertTrue(caption.has_emoji("NO WAY 🔥"))
+        self.assertFalse(caption.has_emoji("NO WAY (100%) ©"))
+        self.assertEqual(caption.strip_emoji("NO WAY 🔥 💀"), "NO WAY")
+        self.assertEqual(caption.runs("NO WAY 🔥"),
+                         [("NO WAY ", False), ("🔥", True)])
+        self.assertEqual(caption.runs("🔥🔥 ok"),
+                         [("🔥🔥", True), (" ok", False)])
+
+    def test_emoji_survive_sanitize_only_when_asked(self):
+        self.assertEqual(caption.sanitize("OK 🔥"), "OK ?")
+        self.assertEqual(caption.sanitize("OK 🔥", emoji=True), "OK 🔥")
+
+    def test_one_user_is_not_a_reaction(self):
+        self.assertEqual(chat_reaction([{"user": "a", "text": "🔥🔥"}]), "")
+        self.assertEqual(chat_reaction([{"user": "a", "text": "🔥"},
+                                        {"user": "b", "text": "lol"}]), "")
+
+    def test_two_users_make_the_reaction(self):
+        chat = [{"user": "a", "text": "🔥"},
+                {"user": "b", "text": "🔥🔥"},
+                {"user": "c", "text": "😂"}]
+        self.assertEqual(chat_reaction(chat), "🔥")
+
+    def test_hook_borrows_the_chat_reaction(self):
+        chat = [{"user": "a", "text": "LOOK AT THE MAP 🔥"},
+                {"user": "b", "text": "look at the map 🔥"}]
+        self.assertEqual(pick_title(Config(), {}, [], chat),
+                         "CHAT SAYS LOOK AT THE MAP 🔥")
+
+    def test_a_fixed_hook_keeps_the_author_s_emoji(self):
+        cfg = Config(title_mode="fixed", title="COOKED 💀")
+        self.assertEqual(pick_title(cfg, {}, [], []), "COOKED 💀")
+
+    @unittest.skipUnless(caption.can_render_emoji(), "no emoji face")
+    def test_styled_hook_draws_the_emoji_as_colour(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hook.png"
+            size = caption.render_styled(
+                "NO WAY 🔥", 60, path, 900, font=caption.hook_font(),
+                fill=caption.HOOK_FILL, char_width=0.72, emoji=True)
+            self.assertIsNotNone(size)
+            # The gold text alone is a handful of flat shades; a real colour
+            # emoji brings dozens.
+            out = subprocess.run([caption.magick_binary(), str(path),
+                                  "-format", "%k", "info:"],
+                                 capture_output=True, text=True)
+            self.assertGreater(int(out.stdout.strip() or 0), 40)
+
+    @unittest.skipUnless(caption.emoji_font(), "no emoji font installed")
+    def test_the_font_hands_back_the_real_bitmap(self):
+        data = emoji_mod.glyph_png(caption.emoji_font() or "", "🔥")
+        if data is None:
+            self.skipTest("font has no sbix bitmaps")
+        self.assertTrue(data.startswith(b"\x89PNG"))
 
 
 class PopCaptionTest(unittest.TestCase):

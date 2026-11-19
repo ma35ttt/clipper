@@ -227,6 +227,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
              else "bitmap fallback (brew install imagemagick for outlined text)")
     rows.append(("caption style", style, styled))
 
+    from . import emoji as emoji_mod
+
+    face = caption_mod.emoji_font() if styled else None
+    if not face:
+        rows.append(("hook emoji", "silhouette (no colour emoji font)", False))
+    elif emoji_mod.glyph_png(face, "🔥"):
+        rows.append(("hook emoji", f"colour bitmaps · {Path(face).name}", True))
+    else:
+        rows.append(("hook emoji", f"silhouette · {Path(face).name}", True))
+
     from . import camera as camera_mod
 
     if camera_mod.available():

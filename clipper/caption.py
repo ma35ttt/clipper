@@ -14,6 +14,7 @@ import zlib
 from functools import lru_cache
 from pathlib import Path
 
+from . import emoji as emoji_mod
 from .util import FFMPEG, find_font, have, run
 
 # 5x7 glyphs, one char per pixel.
@@ -118,9 +119,77 @@ def styled_font() -> str | None:
     return find_font()
 
 
+# A hook reads better with one emoji from the audience's own reaction
+# ("COOKED 🔥"). Anything outside these ranges stays plain text: punctuation
+# like © or ™ is not emoji and should not drag the emoji renderer in.
+EMOJI_SPANS = (
+    (0x1F000, 0x1FAFF),   # pictographs, emoticons, symbols, skin tones
+    (0x1F1E6, 0x1F1FF),   # flags
+    (0x2600, 0x27BF),     # misc symbols, dingbats (☠ ✅ ➡)
+    (0x2B00, 0x2BFF),     # stars and arrows
+)
+EMOJI_JOINERS = {0x200D, 0xFE0E, 0xFE0F, 0x20E3}
+EMOJI_FONT_CANDIDATES = (
+    "/System/Library/Fonts/Apple Color Emoji.ttc",
+    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+    "/usr/share/fonts/noto-emoji/NotoColorEmoji.ttf",
+    "C:/Windows/Fonts/seguiemj.ttf",
+)
+
+
+def is_emoji(ch: str) -> bool:
+    code = ord(ch)
+    if code in EMOJI_JOINERS:
+        return True
+    return any(low <= code <= high for low, high in EMOJI_SPANS)
+
+
+def has_emoji(text: str) -> bool:
+    return any(is_emoji(ch) for ch in text)
+
+
+def strip_emoji(text: str) -> str:
+    kept = "".join("" if is_emoji(ch) else ch for ch in text)
+    return re.sub(r"\s+", " ", kept).strip()
+
+
+def runs(text: str) -> list[tuple[str, bool]]:
+    """Split text into (chunk, is_emoji) runs so each can use its own font."""
+    out: list[tuple[str, bool]] = []
+    buf, flag = "", None
+    for ch in text:
+        emoji = is_emoji(ch)
+        if flag is None or emoji == flag:
+            buf += ch
+            flag = emoji
+        else:
+            out.append((buf, bool(flag)))
+            buf, flag = ch, emoji
+    if buf:
+        out.append((buf, bool(flag)))
+    return out
+
+
+@lru_cache(maxsize=1)
+def emoji_font() -> str | None:
+    override = os.environ.get("CLIPPER_EMOJI_FONT")
+    if override and Path(override).exists():
+        return override
+    for cand in EMOJI_FONT_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
 @lru_cache(maxsize=1)
 def has_styled() -> bool:
     return bool(magick_binary() and styled_font())
+
+
+def can_render_emoji() -> bool:
+    """True when a real hook PNG can carry emoji instead of dropping them."""
+    return bool(magick_binary() and styled_font() and emoji_font())
 
 
 def _png_size(path: Path) -> tuple[int, int]:
@@ -134,7 +203,7 @@ def _png_size(path: Path) -> tuple[int, int]:
 
 
 def _label_png(binary: str, font: str, px: int, text: str, path: Path,
-               stroke_px: int, fill: str = "white") -> bool:
+               stroke_px: int, fill: str = "white", pad: int = 0) -> bool:
     """Render text with a true *outside* black outline to ``path``.
 
     ImageMagick centres a stroke on the glyph edge, so the usual
@@ -143,6 +212,10 @@ def _label_png(binary: str, font: str, px: int, text: str, path: Path,
     silhouette and the untouched fill (white by default, gold for the hook) is
     composited on top. One process, one image, and the letters keep their full
     weight.
+
+    ``pad`` adds transparent pixels around the trimmed result, which is how
+    neighbouring emoji and words get a little breathing room when a row is
+    assembled.
     """
     margin = stroke_px * 2 + 4
     result = run([
@@ -153,14 +226,105 @@ def _label_png(binary: str, font: str, px: int, text: str, path: Path,
         f"Disk:{stroke_px}", "+channel", "-fill", "black", "-colorize", "100",
         ")",
         "+swap", "-compose", "over", "-composite",
-        "-trim", "+repage", f"PNG32:{path}",
-    ], timeout=30)
+        "-trim", "+repage",
+    ] + (["-bordercolor", "none", "-border", str(pad)] if pad else [])
+      + [f"PNG32:{path}"], timeout=30)
     return result.returncode == 0 and path.exists()
+
+
+# Apple Color Emoji only exposes its fixed bitmap strikes; anything between
+# them fails to load. Render at a strike that exists and scale down.
+EMOJI_STRIKES = (160, 96, 64, 48, 40, 32, 20)
+
+
+def _colour_emoji_png(binary: str, font: str, font_px: int, text: str,
+                      path: Path, stroke_px: int, pad: int = 0) -> bool:
+    """Draw emoji from the font's own PNG bitmaps: the real iPhone colours.
+
+    Each glyph is scaled to sit level with the hook text, given the same black
+    outline as the letters (the outline is a dilated alpha mask behind the
+    untouched colour image), then the run is joined into one strip.
+    """
+    pieces = emoji_mod.digest(font, text)
+    if not pieces:
+        return False
+    target = max(12, int(round(font_px * 1.02)))
+    margin = stroke_px * 2 + 4
+    made: list[Path] = []
+    try:
+        for index, (_, data) in enumerate(pieces):
+            raw = path.with_name(f"{path.stem}_r{index}.png")
+            raw.write_bytes(data)
+            piece = path.with_name(f"{path.stem}_c{index}.png")
+            command = [
+                binary, "-background", "none", str(raw),
+                "-resize", f"x{target}",
+                "-bordercolor", "none", "-border", str(margin),
+                "(", "+clone", "-channel", "A", "-morphology", "Dilate",
+                f"Disk:{stroke_px}", "+channel", "-fill", "black",
+                "-colorize", "100", ")",
+                "+swap", "-compose", "over", "-composite",
+                "-trim", "+repage",
+            ]
+            if pad:
+                command += ["-bordercolor", "none", "-border", str(pad)]
+            command += [f"PNG32:{piece}"]
+            if run(command, timeout=30).returncode != 0 or not piece.exists():
+                return False
+            made.append(piece)
+        row = [binary, "-background", "none", "-gravity", "center"]
+        row += [str(piece) for piece in made]
+        row += ["+append", "-trim", "+repage", f"PNG32:{path}"]
+        return run(row, timeout=30).returncode == 0 and path.exists()
+    finally:
+        for piece in made:
+            try:
+                piece.unlink()
+            except OSError:
+                pass
+        for raw in path.parent.glob(f"{path.stem}_r*.png"):
+            try:
+                raw.unlink()
+            except OSError:
+                pass
+
+
+def _emoji_png(binary: str, font: str, font_px: int, text: str, path: Path,
+               stroke_px: int, fill: str, pad: int = 0) -> bool:
+    """One emoji run, outlined and scaled to sit on the hook's baseline."""
+    if _colour_emoji_png(binary, font, font_px, text, path, stroke_px, pad):
+        return True
+    # A font with no sbix bitmaps (or an unreadable one): draw the glyph and
+    # tint it, which at least keeps the emoji's shape.
+    target = max(12, int(round(font_px * 1.02)))
+    for strike in EMOJI_STRIKES:
+        margin = stroke_px * 2 + 4
+        result = run([
+            binary, "-background", "none", "-fill", fill, "-stroke", "none",
+            "-font", font, "-pointsize", str(strike), f"label:{text}",
+            "-resize", f"x{target}",
+            # Apple's bitmap emoji comes back as a soft alpha mask, so a gold
+            # fill composites over the black outline as muddy brown. Snap the
+            # mask opaque: the result is the same flat gold-and-outline look
+            # the hook text has.
+            "-channel", "A", "-threshold", "8%", "+channel",
+            "-bordercolor", "none", "-border", str(margin),
+            "(", "+clone", "-channel", "A", "-morphology", "Dilate",
+            f"Disk:{stroke_px}", "+channel", "-fill", "black", "-colorize", "100",
+            ")",
+            "+swap", "-compose", "over", "-composite",
+            "-trim", "+repage",
+        ] + (["-bordercolor", "none", "-border", str(pad)] if pad else [])
+          + [f"PNG32:{path}"], timeout=30)
+        if result.returncode == 0 and path.exists():
+            return True
+    return False
 
 
 def render_styled(text: str, font_px: int, path: Path, max_width: int,
                   max_lines: int = 2, font: str | None = None,
-                  fill: str = "white", char_width: float = 0.56) -> tuple[int, int] | None:
+                  fill: str = "white", char_width: float = 0.56,
+                  emoji: bool = False) -> tuple[int, int] | None:
     """Heavy text with a thick black outline on a transparent PNG.
 
     ``font``/``fill`` let the hook use its own face and colour while the
@@ -171,6 +335,10 @@ def render_styled(text: str, font_px: int, path: Path, max_width: int,
     Each line is rendered on its own and the lines are stacked centred: passing
     a multi-line ``label:`` together with ``-gravity`` makes ImageMagick drop
     the fill on the second line, which looks like hollow text.
+
+    With ``emoji=True`` a line is split into text and emoji runs, each drawn in
+    a font that actually has the glyph, then joined into one row. Arial has no
+    emoji, so without this the characters silently vanish (or become ``?``).
     """
     binary = magick_binary()
     font = font or styled_font()
@@ -179,17 +347,44 @@ def render_styled(text: str, font_px: int, path: Path, max_width: int,
     # Arial Bold averages ~0.56em per character; Arial Black ~0.72em. Aim just
     # under max_width.
     per_line = max(6, int(max_width / (font_px * char_width)))
-    lines = [line for line in wrap(text, per_line, max_lines) if line.strip()]
+    lines = [line for line in wrap(text, per_line, max_lines, emoji=emoji)
+             if line.strip()]
     if not lines:
         return None
     stroke = max(2, int(round(font_px * 0.09)))
+    emoji_face = emoji_font() if emoji else None
     pieces: list[Path] = []
     try:
         for index, line in enumerate(lines):
+            row_parts: list[Path] = []
+            for part_index, (chunk, is_emoji_run) in enumerate(runs(line)):
+                if is_emoji_run and emoji_face:
+                    part = path.with_name(f"{path.stem}_l{index}e{part_index}.png")
+                    if not _emoji_png(binary, emoji_face, font_px, chunk, part,
+                                      stroke, fill, pad=4):
+                        continue
+                elif chunk.strip():
+                    part = path.with_name(f"{path.stem}_l{index}t{part_index}.png")
+                    if not _label_png(binary, font, font_px, chunk, part,
+                                      stroke, fill, pad=4):
+                        return None
+                else:
+                    continue
+                row_parts.append(part)
+            if not row_parts:
+                return None
             piece = path.with_name(f"{path.stem}_line{index}.png")
-            if not _label_png(binary, font, font_px, line, piece, stroke, fill):
+            row = [binary, "-background", "none", "-gravity", "center"]
+            row += [str(part) for part in row_parts]
+            row += ["+append", "-trim", "+repage", f"PNG32:{piece}"]
+            if run(row, timeout=30).returncode != 0 or not piece.exists():
                 return None
             pieces.append(piece)
+            for part in row_parts:
+                try:
+                    part.unlink()
+                except OSError:
+                    pass
 
         stack = [binary, "-background", "none", "-gravity", "center"]
         stack += [str(piece) for piece in pieces]
@@ -211,10 +406,12 @@ def render_styled(text: str, font_px: int, path: Path, max_width: int,
     return width, height
 
 
-def sanitize(text: str) -> str:
+def sanitize(text: str, emoji: bool = False) -> str:
     out = []
     for ch in text.upper():
         if ch == " " or ch in FONT:
+            out.append(ch)
+        elif emoji and is_emoji(ch):
             out.append(ch)
         elif ch in "\n\t":
             out.append(" ")
@@ -223,9 +420,10 @@ def sanitize(text: str) -> str:
     return "".join(out)
 
 
-def wrap(text: str, max_chars: int, max_lines: int = 3) -> list[str]:
+def wrap(text: str, max_chars: int, max_lines: int = 3,
+         emoji: bool = False) -> list[str]:
     words: list[str] = []
-    for line in sanitize(text).splitlines():
+    for line in sanitize(text, emoji=emoji).splitlines():
         words.extend(line.split())
     lines: list[str] = []
     current = ""

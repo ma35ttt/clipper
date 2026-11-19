@@ -367,6 +367,12 @@ With `--title-mode auto` the hook comes from the clip, never from a template:
 The hook uses a heavy title face in gold with a black outline; subtitles stay
 white. They are placed so they never overlap.
 
+One emoji can join the hook, but only one the audience actually used in this
+clip's chat (two different people, from a short reaction set). A fixed
+`--title` keeps whatever emoji you type. On macOS those are the real iPhone
+emoji, read straight from the system font's colour bitmaps; elsewhere they
+render as a tinted silhouette, and a hook never invents an emoji on its own.
+
 ---
 
 ## Command line reference

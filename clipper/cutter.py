@@ -131,6 +131,30 @@ def hook_from_chat(chat) -> str:
     return best
 
 
+# Hooks can borrow one emoji from the audience, never invent their own: only an
+# emoji that at least two different people typed in this clip's chat, and only
+# from a small set that reads as a reaction rather than decoration.
+REACTION_EMOJI = ("🔥", "💀", "😂", "🤯", "😱", "🥶", "🗿", "💯", "👀")
+
+
+def chat_reaction(chat) -> str:
+    """The reaction emoji chat actually used in this clip, or ""."""
+    from collections import defaultdict
+
+    users: defaultdict[str, set[str]] = defaultdict(set)
+    for index, message in enumerate(chat or ()):
+        text, user = _chat_text(message)
+        who = user or f"#{index}"
+        for ch in text:
+            if ch in REACTION_EMOJI:
+                users[ch].add(who)
+    best = ""
+    for emoji, people in users.items():
+        if len(people) >= 2 and len(people) > len(users.get(best, ())):
+            best = emoji
+    return best
+
+
 def hook_keyword(chat) -> str:
     """One word chat keeps shouting on its own ("BACK", "MAP", "COOKED").
 
@@ -215,19 +239,22 @@ def pick_title(cfg: Config, signals: dict, cues=(), chat=()) -> str:
         return ""
     if cfg.title_mode == "fixed":
         return cfg.title or ""
+    hook = ""
     repeated = hook_from_chat(chat)
     if repeated:
-        return f"CHAT SAYS {repeated}"
-    question = hook_question(cues)
-    if question:
-        return question
-    quote = hook_from_cues(cues)
-    if quote:
-        return quote
-    keyword = hook_keyword(chat)
-    if keyword:
-        return f"CHAT SAYS {keyword}"
-    return ""
+        hook = f"CHAT SAYS {repeated}"
+    if not hook:
+        hook = hook_question(cues)
+    if not hook:
+        hook = hook_from_cues(cues)
+    if not hook:
+        keyword = hook_keyword(chat)
+        if keyword:
+            hook = f"CHAT SAYS {keyword}"
+    if not hook:
+        return ""
+    reaction = chat_reaction(chat)
+    return f"{hook} {reaction}" if reaction else hook
 
 
 def _wrap(text: str, width: int = 20) -> str:
@@ -738,7 +765,8 @@ class Cutter:
         def draw_png(text: str, path: Path, font_px: int, max_width: int,
                      pop: bool = False, font: str | None = None,
                      fill: str = "white",
-                     char_width: float = 0.56) -> tuple[int, int]:
+                     char_width: float = 0.56,
+                     emoji: bool = False) -> tuple[int, int]:
             """Rasterise one overlay and register it as the next ffmpeg input."""
             drawn = None
             # Real outlined font when ImageMagick is around, bitmap otherwise.
@@ -749,8 +777,11 @@ class Cutter:
                 else:
                     drawn = caption.render_styled(text, font_px, path, max_width,
                                                   font=font, fill=fill,
-                                                  char_width=char_width)
+                                                  char_width=char_width,
+                                                  emoji=emoji)
             if drawn is None:
+                if emoji:
+                    text = caption.strip_emoji(text)
                 drawn = caption.render(text, font_px, path, max_width)
             extra.append(path)
             return drawn or (0, 0)
@@ -768,7 +799,13 @@ class Cutter:
         if title:
             hook_font = caption.hook_font()
             font = hook_font or find_font()
-            if caption.has_drawtext() and font:
+            # drawtext has no emoji fallback, and Arial Black has no emoji
+            # glyphs: keep emoji on the PNG path, and drop them only when no
+            # emoji face exists at all (a "?" in a hook is worse than no emoji).
+            emoji = caption.has_emoji(title) and caption.can_render_emoji()
+            if not emoji:
+                title = caption.strip_emoji(title)
+            if caption.has_drawtext() and font and not emoji:
                 prepared.title_file.write_text(_wrap(title.upper()), encoding="utf-8")
                 size = int(1080 * 0.062) if vertical else int(max(320, prepared.height or 720) * 0.072)
                 if geo:
@@ -798,6 +835,7 @@ class Cutter:
                     title, prepared.work / "title.png", font_px, max_width,
                     font=hook_font, fill=caption.HOOK_FILL,
                     char_width=0.72 if hook_font else 0.56,
+                    emoji=emoji,
                 )
                 if geo:
                     # Just under the gameplay, above the subtitle band; if the
