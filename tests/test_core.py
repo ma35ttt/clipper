@@ -1427,8 +1427,21 @@ class DashboardTest(unittest.TestCase):
                          "/api/autoconfigure", "/api/profile", "/api/camera",
                          "/api/clips/delete", "/api/clip", "/api/streams",
                          "/api/streams/stop", "/api/streams/retry",
-                         "/api/vod", "/api/style", "?download=1"):
+                         "/api/vod", "/api/upload", "/api/style", "?download=1"):
             self.assertIn(endpoint, PAGE, endpoint)
+
+    def test_page_has_local_file_drop_and_a_select_button(self):
+        import re
+
+        from clipper.dashboard import PAGE
+
+        ids = set(re.findall(r'id="([^"]+)"', PAGE))
+        for key in ("dropzone", "fileinput", "localfile",
+                    "uploadbar", "uploadfill", "uploadnote"):
+            self.assertIn(key, ids, key)
+        self.assertIn("Select from local", PAGE)
+        self.assertIn("queueLocal(", PAGE)
+        self.assertIn("type=\"file\"", PAGE)
 
     def test_page_has_auto_configure_button(self):
         import re
@@ -1460,6 +1473,125 @@ class DashboardTest(unittest.TestCase):
             self.assertIn(f'id="{key}"', PAGE, key)
         self.assertIn("startVod()", PAGE)
         self.assertIn("updateClipper()", PAGE)
+
+
+class UploadTest(unittest.TestCase):
+    """Dropping a local recording streams bytes into <work>/uploads."""
+
+    class _Engine:
+        def __init__(self, work_dir: Path):
+            self.cfg = types.SimpleNamespace(work_dir=work_dir)
+            self.logs: list[str] = []
+
+        def log(self, message: str) -> None:
+            self.logs.append(message)
+
+    def test_upload_name_accepts_video_and_strips_paths(self):
+        from clipper.dashboard import upload_name
+
+        self.assertEqual(upload_name("/tmp/My Clip.MP4"),
+                         ("My_Clip", ".mp4"))
+        self.assertEqual(upload_name("../../stream.mkv"),
+                         ("stream", ".mkv"))
+        self.assertEqual(upload_name(r"C:\Users\me\Videos\Run.MOV"),
+                         ("Run", ".mov"))
+        with self.assertRaises(ValueError):
+            upload_name("notes.txt")
+        with self.assertRaises(ValueError):
+            upload_name("no-extension")
+
+    def test_upload_streams_and_probes_a_video(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from urllib.parse import quote
+
+        from clipper.dashboard import _Handler
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            source = root / "source.mp4"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc2=size=320x240:rate=15:duration=1",
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", str(source)],
+                check=True)
+            payload = source.read_bytes()
+            engine = self._Engine(work)
+            handler = type("UploadHandler", (_Handler,), {
+                "engine": engine, "clips_dir": root / "clips",
+            })
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            port = server.server_address[1]
+
+            def post(name: str, body: bytes, origin: str | None = None):
+                conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+                headers = {"Content-Type": "application/octet-stream"}
+                if origin:
+                    headers["Origin"] = origin
+                conn.request("POST", "/api/upload?name=" + quote(name),
+                             body=body, headers=headers)
+                reply = conn.getresponse()
+                data = json.loads(reply.read().decode("utf-8"))
+                conn.close()
+                return reply.status, data
+
+            try:
+                status, data = post("My Clip.MP4", payload)
+                self.assertEqual(status, 200, data)
+                self.assertTrue(data.get("ok"), data)
+                self.assertEqual(data.get("stem"), "My_Clip")
+                stored = Path(data["path"])
+                self.assertTrue(stored.exists())
+                self.assertEqual(stored.parent.name, "uploads")
+                self.assertGreater(data.get("duration") or 0, 0.5)
+                self.assertEqual(stored.stat().st_size, len(payload))
+                self.assertTrue(engine.logs)
+
+                status, data = post("notes.txt", b"hello")
+                self.assertEqual(status, 400, data)
+                self.assertIn("cannot clip", data.get("error", ""))
+
+                status, data = post("evil.mp4", payload,
+                                    origin="http://evil.example")
+                self.assertEqual(status, 403, data)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_upload_rejects_an_empty_body(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from urllib.parse import quote
+
+        from clipper.dashboard import _Handler
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            engine = self._Engine(root / "work")
+            handler = type("UploadHandler", (_Handler,), {
+                "engine": engine, "clips_dir": root / "clips",
+            })
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                conn = http.client.HTTPConnection(
+                    "127.0.0.1", server.server_address[1], timeout=10)
+                conn.request("POST", "/api/upload?name=" + quote("empty.mp4"),
+                             body=b"")
+                reply = conn.getresponse()
+                data = json.loads(reply.read().decode("utf-8"))
+                conn.close()
+                self.assertEqual(reply.status, 400, data)
+                self.assertIn("no file data", data.get("error", ""))
+            finally:
+                server.shutdown()
+                server.server_close()
 
 
 class VodTest(unittest.TestCase):

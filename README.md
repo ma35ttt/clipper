@@ -195,6 +195,9 @@ your machine only; nothing is exposed to the network.
   console.
 - **Clip a past stream** — paste a finished Twitch VOD or YouTube link and clipper
   analyses the whole thing and cuts its best moments (see below).
+- **Drop a local recording** — drop an MP4/MOV/MKV from Finder on the same card,
+  or press **Select from local**. It is stored under `.clipper/uploads/` and
+  clipped exactly like a pasted link. Nothing leaves your machine.
 - **Update** — pull the newest version from GitHub without leaving the page.
 - **Clip wall** — play, download, copy the path, or delete each clip.
 
@@ -253,7 +256,12 @@ Useful extras:
 ```
 
 `vod` is also a button on the console: paste a past-stream link into **Clip a
-past stream** and watch the progress bar in the panel.
+past stream** and watch the progress bar in the panel. The same card accepts a
+recording from your Mac — drag it from Finder onto the drop zone, or press
+**Select from local**. The browser sends the file to the console, which stores it
+in `<work>/uploads/` and runs the normal VOD pass. Several dropped files are
+queued and clipped one after another. Files live in that folder after the run so
+you can press **Clip past stream** again for the next batch.
 
 ---
 

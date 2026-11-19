@@ -10,10 +10,43 @@ clip housekeeping — all talking to the engine over small JSON endpoints.
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+from .util import probe, safe_name
+
+# Recordings dropped on the dashboard are streamed straight to disk, so the
+# usual 1 MB JSON limit does not apply. These are the containers ffmpeg can
+# open on every platform clipper supports.
+UPLOAD_EXTS = frozenset({
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".ts", ".m2ts", ".flv",
+    ".avi", ".mpg", ".mpeg", ".wmv",
+})
+UPLOAD_LIMIT = 32 * 1024 ** 3      # 32 GB is more than a 12-hour recording
+UPLOAD_RESERVE = 1 * 1024 ** 3     # keep a gigabyte free after the write
+
+
+def upload_name(raw: str) -> tuple[str, str]:
+    """Split a dropped filename into a safe stem and a known extension.
+
+    The browser supplies only ``File.name``, but it is still user input: strip
+    any directory part, refuse formats ffmpeg cannot read, and flatten the stem
+    so it is safe as a filename and as an output folder.
+    """
+    name = Path(str(raw or "").replace("\\", "/")).name
+    suffix = Path(name).suffix.lower()
+    if suffix not in UPLOAD_EXTS:
+        pretty = suffix or "no extension"
+        raise ValueError(
+            f"cannot clip {pretty} files — drop an MP4, MOV, MKV, WebM, TS or AVI")
+    raw_stem = Path(name).stem
+    stem = safe_name(raw_stem, 60) if raw_stem.strip(" ._-") else "recording"
+    return stem, suffix
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -291,6 +324,32 @@ PAGE = """<!doctype html>
     color: var(--text); border-radius: 8px; padding: 7px 8px; font-size: 12px;
   }
   .vodcard .vcheck input { accent-color: var(--blue); }
+  .dropzone {
+    margin-top: 12px; padding: 16px; border: 1px dashed var(--line2);
+    border-radius: 12px; background: rgba(8,10,15,.32); cursor: pointer;
+    text-align: center; transition: border-color .16s ease, background .16s ease;
+  }
+  .dropzone:hover, .dropzone:focus-visible {
+    outline: none; border-color: rgba(106,168,255,.65);
+    background: rgba(106,168,255,.06);
+  }
+  .dropzone.drag {
+    border-color: var(--blue); background: rgba(106,168,255,.11);
+    box-shadow: inset 0 0 0 1px rgba(106,168,255,.35);
+  }
+  .dropzone .dmain { display: flex; align-items: center; justify-content: center;
+                     gap: 9px; flex-wrap: wrap; font-size: 13px; color: var(--text); }
+  .dropzone .dmain b { font-weight: 700; }
+  .dropzone .dsub { color: var(--faint); font-size: 11.5px; }
+  .dropzone .vnote { margin-top: 6px; }
+  .uploadbar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.07);
+               overflow: hidden; margin-top: 10px; }
+  .uploadbar > i { display: block; height: 100%; width: 0%; border-radius: 99px;
+                   background: linear-gradient(90deg, var(--blue), var(--cool));
+                   transition: width .2s ease; }
+  .uploadnote { color: var(--dim); font-size: 11.5px; margin-top: 7px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .uploadnote.bad { color: var(--hot); }
   .walltools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
   .walltools select {
     background: var(--panel2); border: 1px solid var(--line2); color: var(--text);
@@ -435,6 +494,19 @@ PAGE = """<!doctype html>
       <div class="vnote" id="vodnote">Analyses a finished stream and cuts up to 12 new moments. Run it again for the next batch — already-clipped moments are remembered per source.</div>
       <div class="vodbar hidden" id="vodbar"><i id="vodfill"></i></div>
       <div class="vodstatus hidden" id="vodstatus"><span id="vodphase">starting…</span><b id="vodcount"></b></div>
+      <div class="dropzone" id="dropzone" role="button" tabindex="0"
+           aria-label="Drop a recording here or select one from this Mac">
+        <div class="dmain">
+          <b>Drop a recording here</b>
+          <span class="dsub">or</span>
+          <button class="btn ghost" id="localfile" type="button">Select from local</button>
+        </div>
+        <div class="vnote">MP4, MOV, MKV, WebM, TS or AVI · analysed on this Mac, never uploaded anywhere else · needs about a minute of footage.</div>
+        <input type="file" id="fileinput" hidden multiple
+               accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.ts,.m2ts,.flv,.avi,.mpg,.mpeg,.wmv">
+      </div>
+      <div class="uploadbar hidden" id="uploadbar"><i id="uploadfill"></i></div>
+      <div class="uploadnote hidden" id="uploadnote"></div>
     </div>
   </section>
   <section class="panel">
@@ -495,6 +567,10 @@ let outDir = '';
 let autoOn = false;
 let recording = false;
 let settingsTimer = null;
+let vodRunning = false;
+let uploadBusy = false;
+let uploadQueue = [];
+let pendingLocal = [];
 const history = [];
 const MAXH = 90;
 let threshold = 0.62;
@@ -645,24 +721,151 @@ async function updateClipper() {
 }
 
 /* -- past streams (the VOD section) --------------------------------- */
-async function startVod() {
+async function startVod(path, name) {
   const input = $('vodinput');
-  const link = input.value.trim();
-  if (!link) { toast('paste a link to a past stream first', true); return; }
+  const link = String(path || input.value || '').trim();
+  if (!link) { toast('paste a link or drop a recording first', true); return false; }
   const btn = $('vodbtn');
   btn.disabled = true; btn.textContent = 'Starting...';
   const r = await postJSON('/api/vod', {
     url: link,
-    name: $('nameinput').value.trim(),
+    name: String(name == null ? $('nameinput').value.trim() : name),
     max_clips: Number($('vodmax').value || 12),
     reset: $('vodreset').checked,
   });
   btn.disabled = false; btn.textContent = 'Clip past stream';
-  if (!r) return;
-  if (r.ok === false) return toast(r.error || 'could not start', true);
+  if (!r) return false;
+  if (r.ok === false) { toast(r.error || 'could not start', true); return false; }
+  vodRunning = true;
   // Keep the link in the box: pressing the button again takes the next batch.
   toast('analysing the past stream — watch the activity log');
+  return true;
 }
+
+/* -- local recordings ----------------------------------------------- */
+// Browsers cannot hand us a path, so a dropped file is streamed to the console
+// as raw bytes. It lands in <work>/uploads, then the normal past-stream path
+// analyses and cuts it exactly as if a Twitch VOD had been pasted.
+function pickLocal() {
+  $('fileinput').click();
+}
+
+function queueLocal(fileList) {
+  const files = [...(fileList || [])];
+  if (!files.length) return;
+  for (const file of files) {
+    if (!videoExtension(file.name)) {
+      toast('cannot clip ' + file.name + ' — drop an MP4, MOV, MKV, WebM, TS or AVI', true);
+      continue;
+    }
+    uploadQueue.push(file);
+  }
+  pumpLocal();
+}
+
+function videoExtension(name) {
+  return /\\.(mp4|m4v|mov|mkv|webm|ts|m2ts|flv|avi|mpg|mpeg|wmv)$/i.test(name || '');
+}
+
+function uploadFile(file) {
+  return new Promise(resolve => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = e => {
+      if (!e.lengthComputable) return;
+      showUpload(file.name + ' — ' + Math.round(100 * e.loaded / e.total) + '%',
+                 e.loaded / e.total);
+    };
+    xhr.onload = () => {
+      try { resolve(JSON.parse(xhr.responseText || '{}')); }
+      catch (err) { resolve({ok: false, error: 'console sent an unreadable reply'}); }
+    };
+    xhr.onerror = () => resolve({ok: false, error: 'upload could not reach the console'});
+    xhr.onabort = () => resolve({ok: false, error: 'upload cancelled'});
+    xhr.send(file);
+  });
+}
+
+function showUpload(note, ratio, bad) {
+  const bar = $('uploadbar'), fill = $('uploadfill'), text = $('uploadnote');
+  bar.classList.toggle('hidden', ratio == null);
+  text.classList.remove('hidden');
+  text.classList.toggle('bad', !!bad);
+  text.textContent = note;
+  if (ratio != null) fill.style.width = pct(ratio);
+}
+
+function hideUploadSoon() {
+  setTimeout(() => {
+    if (uploadBusy) return;
+    $('uploadbar').classList.add('hidden');
+    $('uploadnote').classList.add('hidden');
+  }, 5000);
+}
+
+async function pumpLocal() {
+  if (uploadBusy) return;
+  // Start anything already uploaded before taking the next file, so a queue of
+  // drops is processed one recording at a time, in order.
+  if (pendingLocal.length && !vodRunning) {
+    const next = pendingLocal.shift();
+    $('vodinput').value = next.path;
+    if (!$('nameinput').value.trim()) $('nameinput').value = next.stem;
+    const started = await startVod(next.path, next.stem);
+    if (started) { hideUploadSoon(); return; }
+  }
+  if (!uploadQueue.length) { hideUploadSoon(); return; }
+  const file = uploadQueue.shift();
+  uploadBusy = true;
+  $('vodbtn').disabled = true;
+  showUpload('sending ' + file.name + ' to this Mac...', 0);
+  const r = await uploadFile(file);
+  uploadBusy = false;
+  $('vodbtn').disabled = false;
+  if (!r || r.ok === false) {
+    showUpload((r && r.error) || 'upload failed', null, true);
+    hideUploadSoon();
+    pumpLocal();
+    return;
+  }
+  const secs = Math.round(r.duration || 0);
+  const length = secs >= 60 ? Math.round(secs / 60) + ' min' : secs + ' s';
+  showUpload('stored ' + r.name + ' · ' + length, 1);
+  pendingLocal.push({path: r.path, stem: r.stem || 'recording'});
+  pumpLocal();
+}
+
+const dropzone = $('dropzone');
+$('fileinput').addEventListener('change', e => {
+  queueLocal(e.target.files);
+  e.target.value = '';
+});
+dropzone.addEventListener('click', e => {
+  // The file input lives inside the box; ignore its own click so opening the
+  // picker does not bubble back here and reopen it.
+  if (e.target !== $('fileinput')) pickLocal();
+});
+dropzone.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickLocal(); }
+});
+['dragenter', 'dragover'].forEach(name => dropzone.addEventListener(name, e => {
+  e.preventDefault(); e.stopPropagation();
+  dropzone.classList.add('drag');
+}));
+['dragleave', 'dragend'].forEach(name => dropzone.addEventListener(name, e => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+}));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault(); e.stopPropagation();
+  dropzone.classList.remove('drag');
+  queueLocal(e.dataTransfer.files);
+});
+// A file dropped just outside the box must not navigate the page away.
+['dragover', 'drop'].forEach(name => window.addEventListener(name, e => {
+  if (!dropzone.contains(e.target)) e.preventDefault();
+}));
 
 /* -- post-session styling ------------------------------------------- */
 async function styleSelected() {
@@ -719,11 +922,15 @@ const VOD_PHASE = {
 function renderVod(v) {
   const bar = $('vodbar'), status = $('vodstatus'), phase = $('vodphase');
   const count = $('vodcount'), note = $('vodnote'), chip = $('vodchip');
+  const wasRunning = vodRunning;
+  vodRunning = !!(v && v.running);
   if (!v || (!v.running && !v.phase)) {
     bar.classList.add('hidden'); status.classList.add('hidden');
     chip.textContent = 'vod'; chip.style.color = '';
+    if (wasRunning) setTimeout(pumpLocal, 250);
     return;
   }
+  if (wasRunning && !vodRunning) setTimeout(pumpLocal, 250);
   bar.classList.remove('hidden'); status.classList.remove('hidden');
   const total = v.total || 0, done = v.rendered || 0;
   $('vodfill').style.width = total ? pct(Math.min(1, done / total))
@@ -1162,7 +1369,18 @@ class _Handler(BaseHTTPRequestHandler):
         return None
 
     def do_POST(self):  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if not self._same_origin():
+            # The body is still on the socket; close instead of letting it be
+            # parsed as the next keep-alive request.
+            self.close_connection = True
+            return self._json({"ok": False, "error": "cross-origin request refused"},
+                              status=403)
+        # An upload is raw file bytes, not JSON: stream it before the small
+        # JSON reader gets a chance to swallow the first megabyte.
+        if path == "/api/upload":
+            return self._upload(parsed.query)
         body = self._read_json()
         engine = self.engine
         try:
@@ -1239,6 +1457,124 @@ class _Handler(BaseHTTPRequestHandler):
         return None
 
     # -- helpers -------------------------------------------------------
+    def _same_origin(self) -> bool:
+        """Refuse a browser request from another site.
+
+        The console is loopback-only, but any page the operator has open can
+        still POST to 127.0.0.1. Requests without an ``Origin`` header (curl,
+        the tests, a native client) are allowed; a browser request must match
+        the host that served this page.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        return urlparse(origin).netloc == (self.headers.get("Host") or "")
+
+    def _upload(self, query: str):
+        """Stream a dropped recording to ``<work>/uploads`` and probe it.
+
+        The browser sends the file as the request body (not multipart), so the
+        bytes go straight to disk in 1 MiB chunks without buffering a
+        multi-gigabyte recording in memory. The filename arrives in ``?name=``
+        and is reduced to a safe stem and a known video extension.
+        """
+        engine = self.engine
+        params = parse_qs(query or "")
+        raw_name = (params.get("name") or [""])[0]
+        try:
+            stem, suffix = upload_name(raw_name)
+        except ValueError as exc:
+            self.close_connection = True
+            return self._json({"ok": False, "error": str(exc)}, status=400)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            self.close_connection = True
+            return self._json(
+                {"ok": False, "error": "the browser sent no file data"},
+                status=400)
+        if length > UPLOAD_LIMIT:
+            self.close_connection = True
+            return self._json(
+                {"ok": False,
+                 "error": f"that file is larger than the {UPLOAD_LIMIT // 1024**3} GB limit"},
+                status=413)
+
+        work_dir = Path(getattr(engine.cfg, "work_dir", ".clipper"))
+        # Absolute, so the path works in a later rerun even if the console's
+        # working directory changes.
+        folder = (work_dir / "uploads").resolve()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            free = shutil.disk_usage(folder).free
+        except OSError as exc:
+            self.close_connection = True
+            return self._json({"ok": False, "error": f"cannot use {folder}: {exc}"},
+                              status=500)
+        if length + UPLOAD_RESERVE > free:
+            self.close_connection = True
+            return self._json(
+                {"ok": False,
+                 "error": f"not enough free disk space for this file — "
+                          f"{free / 1024**3:.1f} GB free"},
+                status=507)
+
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = folder / f"{stem}-{stamp}{suffix}"
+        serial = 2
+        while target.exists():
+            target = folder / f"{stem}-{stamp}_{serial}{suffix}"
+            serial += 1
+
+        received = 0
+        try:
+            # A client that stalls mid-upload must not pin this handler forever.
+            self.connection.settimeout(120)
+        except OSError:
+            pass
+        try:
+            with open(target, "wb") as fh:
+                while received < length:
+                    chunk = self.rfile.read(min(1 << 20, length - received))
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    received += len(chunk)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            return self._json({"ok": False, "error": f"could not save the upload: {exc}"},
+                              status=500)
+        if received != length:
+            target.unlink(missing_ok=True)
+            return self._json(
+                {"ok": False,
+                 "error": f"upload was interrupted after {received} of {length} bytes"},
+                status=400)
+
+        info = probe(target)
+        duration = float(info.get("duration") or 0.0)
+        if duration <= 0 or not info.get("vcodec"):
+            target.unlink(missing_ok=True)
+            return self._json(
+                {"ok": False,
+                 "error": "that file is not a readable video — try MP4, MOV or MKV"},
+                status=400)
+
+        engine.log(f"local file — {target.name} ({duration / 60:.1f} min, "
+                   f"{received / 1024**2:.0f} MB)")
+        return self._json({
+            "ok": True,
+            "path": str(target),
+            "name": target.name,
+            "stem": stem,
+            "duration": duration,
+            "size": received,
+        })
+
     def _read_json(self) -> dict:
         try:
             length = int(self.headers.get("Content-Length") or 0)
