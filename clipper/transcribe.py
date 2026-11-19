@@ -444,6 +444,20 @@ def word_timings(cues: list[Cue], min_word: float = 0.12) -> list[Cue]:
     return out
 
 
+def shift_cues(cues, delta: float) -> "Cues":
+    """Move cue and word timings by ``delta`` seconds, keeping karaoke data.
+
+    A clip transcribed from an extracted wav starts at 0, but the render burns
+    captions onto the untrimmed buffer and trims afterwards. Shifting by the
+    window offset puts the subtitles back on the timeline the filter sees.
+    """
+    delta = float(delta or 0.0)
+    words = [word.shifted(delta) for word in (getattr(cues, "words", ()) or ())]
+    if abs(delta) < 0.001 and not words:
+        return cues if isinstance(cues, Cues) else Cues(cues)
+    return Cues([cue.shifted(delta) for cue in (cues or ())], words)
+
+
 def _clip_to_speech(words: list[Cue], speech: list[Cue],
                     duration: float | None = None) -> list[Cue]:
     """Drop words that sit in a VAD silence, and trim a padded tail.
@@ -649,7 +663,10 @@ def transcribe(wav: Path, model: str | None = None, language: str = "en",
                     vwords[0].start if vwords else 0.0)
                 plain_onset = words[0].start if words else 0.0
                 shift = onset - plain_onset
-                if words and shift > 0.7:
+                # Whisper commonly stretches its first words back into the
+                # pre-roll silence, but it can also start late. Move the words
+                # either way when the gap is big enough to see on screen.
+                if words and abs(shift) > 0.35:
                     words = _shift_words(words, shift, duration)
                     note += f" · speech starts {onset:.1f}s"
                 if words and vcues:

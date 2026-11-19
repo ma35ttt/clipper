@@ -89,10 +89,10 @@ def autoconfigure(channel: str = "", source: str = "") -> tuple[dict, str]:
         values.update({"w_chat": 0.0, "w_audio": 0.60, "w_text": 0.40})
 
     label = "this console" if key == "console" else (name or "this stream")
-    detail = "capture-only, split frame, webcam follow"
+    detail = "capture-only, duo frame, webcam follow"
     if platform == "YouTube":
         detail += ", audio-led triggers"
-    return values, f"{label} preset · split frame · webcam follow · {detail}"
+    return values, f"{label} preset · duo frame · webcam follow · {detail}"
 
 
 @dataclass(frozen=True)

@@ -35,7 +35,8 @@ from clipper.cutter import (Cutter, cam_window, caption_anchor_y,  # noqa: E402
                             chat_reaction, duo_geometry, duo_graph,
                             hook_from_chat,
                             hook_from_cues, hook_keyword, hook_question,
-                            pick_title, split_geometry, split_graph)
+                            pick_title, split_geometry, split_graph,
+                            Prepared)
 from clipper.engine import Engine  # noqa: E402
 from clipper.hls import HLSBuffer, parse_playlist  # noqa: E402
 from clipper.hls import Segment  # noqa: E402
@@ -429,6 +430,25 @@ class PopChunkTest(unittest.TestCase):
         self.assertEqual(cues, [transcribe.Cue(0.0, 1.0, "HI")])
         self.assertEqual([c.text for c in cues], ["HI"])
         self.assertIsInstance(cues, list)
+
+    def test_shift_cues_moves_the_words_with_the_cues(self):
+        # Karaoke events come from .words, so shifting only the cues would
+        # leave the highlighted word on the old timeline.
+        words = [transcribe.Cue(1.0, 1.4, "NO"),
+                 transcribe.Cue(1.4, 1.9, "WAY")]
+        cues = transcribe.Cues([transcribe.Cue(1.0, 1.9, "NO WAY")], words)
+        moved = transcribe.shift_cues(cues, 4.0)
+        self.assertIsInstance(moved, transcribe.Cues)
+        self.assertAlmostEqual(moved[0].start, 5.0)
+        self.assertAlmostEqual(moved[0].end, 5.9)
+        self.assertEqual([w.start for w in moved.words], [5.0, 5.4])
+
+    def test_shift_cues_cannot_go_negative(self):
+        cues = transcribe.Cues([transcribe.Cue(0.2, 1.0, "HI")],
+                               [transcribe.Cue(0.2, 0.5, "HI")])
+        moved = transcribe.shift_cues(cues, -2.0)
+        self.assertEqual(moved[0].start, 0.0)
+        self.assertEqual(moved.words[0].start, 0.0)
 
 
 class TranscribeTest(unittest.TestCase):
@@ -948,6 +968,32 @@ class CutterTest(unittest.TestCase):
             )
             streams = json.loads(probe.stdout)["streams"]
             self.assertEqual((streams[0]["width"], streams[0]["height"]), (1080, 1920))
+
+    def test_captions_and_punchins_shift_by_the_buffer_offset(self):
+        """Cues start at the clip; the filter graph runs on the untrimmed buffer."""
+        if not caption.ass_available():
+            self.skipTest("libass not available")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            prepared = Prepared(
+                work=tmp_path, list_path=tmp_path / "list.txt", offset=4.0,
+                duration=6.0, width=640, height=360,
+                title_file=tmp_path / "title.txt")
+            cutter = Cutter(Config(out_dir=tmp_path, work_dir=tmp_path,
+                                   layout="vertical"))
+            cues = transcribe.Cues([transcribe.Cue(0.5, 1.5, "NO WAY")],
+                                   [transcribe.Cue(0.5, 1.0, "NO"),
+                                    transcribe.Cue(1.0, 1.5, "WAY")])
+            graph, needs_filter, _ = cutter._graph(
+                prepared, "", cues,
+                {"subs_backend": "ass", "caption_mode": "pop", "caption_px": 72,
+                 "punchins": [{"start": 0.5, "end": 1.5}]})
+            self.assertTrue(needs_filter)
+            ass = (tmp_path / "subs.ass").read_text()
+            self.assertIn("0:00:04.50", ass)
+            self.assertNotIn("0:00:00.50", ass)
+            # The punch-in window moves with the captions, not before them.
+            self.assertIn("between(t,4.500,5.500)", graph)
 
     def test_renders_a_clip_with_subtitle_cues(self):
         with tempfile.TemporaryDirectory() as tmp:

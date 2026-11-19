@@ -971,6 +971,16 @@ class Cutter:
         punchins = [p for p in (opts.get("punchins") or ())
                     if float(p.get("end", 0)) > float(p.get("start", 0))]
 
+        # Captions and punch-ins are timed from the clip's first frame, but the
+        # render burns them onto the *untrimmed* buffer: ``-ss`` sits on the
+        # output, after the filter graph. Without this shift every subtitle
+        # lands ``offset`` seconds early, which is the length of the pre-roll
+        # the live segment buffer keeps. Post-session styling starts at zero,
+        # so only the live window moves.
+        window = 0.0 if composed else float(prepared.offset or 0.0)
+        if window > 0.001 and cues:
+            cues = transcribe.shift_cues(cues, window)
+
         if composed:
             # The input is already a finished vertical clip; restyling only
             # adds overlays and punch-ins, so the split layout must not run a
@@ -1038,8 +1048,8 @@ class Cutter:
         for number, punch in enumerate(punchins):
             try:
                 zoom = max(1.0, min(float(punch.get("zoom", 1.12)), 1.25))
-                start = max(0.0, float(punch.get("start", 0.0)))
-                end = max(start, float(punch.get("end", start + 0.6)))
+                start = max(0.0, float(punch.get("start", 0.0))) + window
+                end = max(start, float(punch.get("end", start + 0.6)) + window)
                 fx = max(0.0, min(float(punch.get("x", 0.5)), 1.0))
                 fy = max(0.0, min(float(punch.get("y", 0.5)), 1.0))
             except (TypeError, ValueError):
