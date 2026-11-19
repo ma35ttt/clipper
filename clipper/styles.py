@@ -24,6 +24,15 @@ from .util import FFMPEG, probe, run, safe_name
 
 CATEGORIES = ("rapid-fire", "hype", "montage", "clean", "podcast")
 
+# Caption treatments. ``pop`` is the word-chunk stream every clipper uses;
+# ``block`` is a readable cue line; ``static`` holds a whole sentence at once;
+# ``word`` shows one huge word at a time (the retention-edit look).
+CAPTION_MODES = ("pop", "block", "static", "word", "off")
+
+# Where the caption sits. ``upper`` and ``middle`` are useful when the face is
+# in the top half; ``seam`` is the join between camera and gameplay.
+ANCHORS = ("auto", "top", "upper", "middle", "seam", "lower", "bottom")
+
 
 @dataclass
 class Style:
@@ -34,10 +43,19 @@ class Style:
     note: str = "One punch-in, popping white captions, gold hook."
     hook: bool = True
     hook_fill: str = "#FFD23F"
-    captions: str = "pop"          # pop | block | off
+    hook_anchor: str = "auto"      # auto | top
+    hook_size: float = 0.0         # fraction of frame width; 0 = default
+    hook_fallback: bool = False    # use the opening line when no quotable hook
+    captions: str = "pop"          # pop | block | static | word | off
     backend: str = "ass"           # ass | png
     caption_fill: str = "#FFFFFF"
     emphasis_fill: str = "#FFD23F"
+    caption_anchor: str = "auto"   # auto | top | upper | middle | seam | lower | bottom
+    caption_size: float = 0.0      # fraction of frame width; 0 = per-mode default
+    kicker: bool = False           # static sentence line alongside word captions
+    kicker_anchor: str = "seam"
+    kicker_size: float = 0.0
+    colour_emphasis: bool = False  # colour a stressed word instead of a punch-in
     punch_count: int = 1
     punch_zoom: float = 1.12
     punch_len: float = 0.6
@@ -50,10 +68,19 @@ class Style:
         self.punch_count = max(0, min(int(self.punch_count), 3))
         self.punch_zoom = max(1.0, min(float(self.punch_zoom), 1.25))
         self.punch_len = max(0.35, min(float(self.punch_len), 0.9))
-        if self.captions not in ("pop", "block", "off"):
+        if self.captions not in CAPTION_MODES:
             self.captions = "pop"
         if self.backend not in ("png", "ass"):
             self.backend = "png"
+        if self.caption_anchor not in ANCHORS:
+            self.caption_anchor = "auto"
+        if self.kicker_anchor not in ANCHORS:
+            self.kicker_anchor = "seam"
+        if self.hook_anchor not in ("auto", "top"):
+            self.hook_anchor = "auto"
+        self.caption_size = max(0.0, min(float(self.caption_size), 0.16))
+        self.kicker_size = max(0.0, min(float(self.kicker_size), 0.10))
+        self.hook_size = max(0.0, min(float(self.hook_size), 0.12))
         if self.category not in CATEGORIES:
             self.category = "clean"
         self.name = safe_name(self.name or "style", 40) or "style"
@@ -71,6 +98,28 @@ BUILTINS: tuple[Style, ...] = (
           hook=False, captions="block", punch_count=0, category="podcast"),
     Style("raw", "Raw", "No captions, no hook, no punch-ins — the capture itself.",
           hook=False, captions="off", punch_count=0, category="clean"),
+    # Reference-derived looks. The first four keep subtitles white, as the
+    # default look does; only ``karaoke`` uses colour, because the reference
+    # reels use a coloured word as the beat marker.
+    Style("story", "Story", "One static white sentence at the seam; no hook, no punch-ins.",
+          hook=False, captions="static", caption_anchor="seam",
+          caption_size=0.050, punch_count=0, category="clean"),
+    Style("story-karaoke", "Story + karaoke",
+          "Static sentence at the seam, one huge word at a time over the camera.",
+          hook=False, captions="word", caption_anchor="upper",
+          caption_size=0.100, kicker=True, kicker_anchor="seam",
+          kicker_size=0.044, punch_count=0, category="clean"),
+    Style("meme", "Meme", "Three-line white caption in the lower third; no hook.",
+          hook=False, captions="static", caption_anchor="lower",
+          caption_size=0.052, punch_count=0, category="clean"),
+    Style("reveal", "Reveal", "Persistent white title at the top, no spoken captions.",
+          hook=True, hook_fill="#FFFFFF", hook_anchor="top", hook_size=0.052,
+          hook_fallback=True, captions="off", punch_count=0, category="podcast"),
+    Style("karaoke", "Karaoke", "One huge uppercase word at a time, coloured on the beat.",
+          hook=False, captions="word", caption_anchor="middle",
+          caption_size=0.115, colour_emphasis=True,
+          emphasis_fill="#FF7A1A", punch_count=0,
+          category="rapid-fire"),
 )
 
 BY_NAME = {style.name: style for style in BUILTINS}

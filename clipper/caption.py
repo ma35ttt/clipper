@@ -641,6 +641,9 @@ def overlay_expr(layout: str = "vertical", style: str = "block") -> tuple[str, s
     elif layout == "split":
         # Under the subtitle block, in the filler band below the gameplay.
         y = "main_h*0.905-overlay_h/2"
+    elif layout == "duo":
+        # The seam is at 44% of the frame; sit just under it, clear of the face.
+        y = "main_h*0.46"
     elif style == "pop":
         y = "main_h*0.085"
     else:
@@ -676,17 +679,34 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
               fill: str = "#FFFFFF", outline: str = "#000000",
               emphasis=(), emphasis_fill: str = HOOK_FILL,
               y: int = 1560, pop: bool = True, margin: int = 64,
-              max_width: int = 980) -> bool:
+              max_width: int = 980, mode: str = "",
+              align: str = "center", uppercase: bool = False,
+              colour_emphasis: bool = False, wrap_chars: int = 0,
+              spacing: int = 0, outline_px: int = 5) -> bool:
     """Write a self-contained ``.ass`` file for libass.
 
     This is the post-session caption backend. It gives per-chunk colour,
     karaoke-style word timing and a scale-in pop, and it is one text file to
-    restyle instead of dozens of PNGs. ``cues`` is whatever whisper returned;
-    the usual popping chunker is applied when ``pop`` is true.
+    restyle instead of dozens of PNGs. ``cues`` is whatever whisper returned.
+
+    ``mode`` picks the treatment: ``pop`` (short word chunks), ``block``
+    (readable cue lines), ``static`` (a whole sentence held at once) or
+    ``word`` (one huge word per cue). ``align`` anchors multiline captions at
+    their top, centre or bottom so a story line grows down from the seam.
     """
     from . import transcribe  # local import: transcribe only depends on util
 
-    chunks = transcribe.pop_chunks(cues) if pop else list(cues or ())
+    mode = mode or ("pop" if pop else "block")
+    if mode == "pop":
+        chunks = transcribe.pop_chunks(cues)
+    elif mode == "static":
+        chunks = transcribe.story_chunks(cues)
+    elif mode == "word":
+        words = list(getattr(cues, "words", ()) or ())
+        chunks = words or transcribe.word_timings(list(cues or ()))
+    else:
+        mode = "block"
+        chunks = list(cues or ())
     if not chunks:
         return False
     wanted = {re.sub(r"[^a-z0-9]", "", word.lower())
@@ -709,31 +729,58 @@ def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
         " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
         " Alignment, MarginL, MarginR, MarginV, Encoding",
         f"Style: Pop,{font},{int(font_px)},{normal},{hot},{border},"
-        f"&H80000000&,1,0,0,0,100,100,0,0,1,5,1,2,"
+        f"&H80000000&,1,0,0,0,100,100,{max(0, int(spacing))},0,1,"
+        f"{max(1, int(outline_px))},1,2,"
         f"{int(margin)},{int(margin)},{int(margin)},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV,"
         " Effect, Text",
     ]
+    anchor = {"top": r"\an8", "bottom": r"\an2"}.get(align, r"\an5")
+    # Static captions break themselves into balanced lines: libass with
+    # WrapStyle 2 only honours explicit breaks, which keeps the shape of a
+    # story caption predictable instead of letting one long word shove the
+    # whole block off centre.
+    columns = int(wrap_chars or 0)
+    if not columns and mode in ("static", "block"):
+        columns = max(12, int(max_width / max(12.0, font_px * 0.56)))
+
+    def wrapped(text: str) -> str:
+        if not columns:
+            return _ass_escape(text)
+        words = text.split()
+        rows: list[str] = []
+        row = ""
+        for word in words:
+            trial = f"{row} {word}".strip()
+            if row and len(trial) > columns:
+                rows.append(row)
+                row = word
+            else:
+                row = trial
+        if row:
+            rows.append(row)
+        return r"\N".join(_ass_escape(part) for part in rows)
+
     for cue in chunks:
         text = strip_emoji(cue.text) if has_emoji(cue.text) else cue.text
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
+        if uppercase or mode == "word":
+            text = text.upper()
         words = text.split()
-        # Highlight the whole chunk when one of its words was picked as the
-        # stressed word: a gold chunk reads instantly at phone size.
         keys = {re.sub(r"[^a-z0-9]", "", word.lower()) for word in words}
-        colour = hot if (wanted and keys & wanted) else ""
-        overrides = [r"\an5", f"\\pos(540,{int(y)})"]
+        colour = hot if (colour_emphasis and wanted and keys & wanted) else ""
+        overrides = [anchor, f"\\pos(540,{int(y)})"]
         if colour:
             overrides.append(f"\\c{colour}")
-        if pop:
-            overrides += [r"\fscx84", r"\fscy84", r"\t(0,110,\fscx100\fscy100)"]
+        if mode in ("pop", "word"):
+            overrides += [r"\fscx86", r"\fscy86", r"\t(0,100,\fscx100\fscy100)"]
         lines.append(
             f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Pop,,0,0,0,,"
-            f"{{{''.join(overrides)}}}{_ass_escape(text)}"
+            f"{{{''.join(overrides)}}}{wrapped(text)}"
         )
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

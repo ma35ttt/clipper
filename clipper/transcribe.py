@@ -552,9 +552,45 @@ def pop_chunks(cues: list[Cue], max_words: int = 3, max_chars: int = 18,
     return shown
 
 
-# --------------------------------------------------------------------------- #
-# transcription
-# --------------------------------------------------------------------------- #
+def story_chunks(cues: list[Cue], max_chars: int = 64, max_words: int = 14,
+                 max_seconds: float = 6.5, gap: float = 0.65,
+                 hold: float = 0.45) -> list[Cue]:
+    """Group cues into the whole-sentence captions a story edit holds on screen.
+
+    Popping captions replace each other every second; a story style shows one
+    readable thought at a time. Adjacent cues are folded together while they
+    still fit in two short lines, and a pause or a finished sentence starts a
+    new caption so the line disappears when nobody is talking. The caption
+    holds for its spoken span plus a hair, capped at ``max_seconds`` so a slow
+    sentence cannot pin it to the screen forever.
+    """
+    groups: list[list[Cue]] = []
+    current: list[Cue] = []
+    for cue in cues or ():
+        text = re.sub(r"\s+", " ", str(getattr(cue, "text", ""))).strip()
+        if not text:
+            continue
+        cue = Cue(cue.start, max(cue.end, cue.start + WORD_MIN), text)
+        trial = " ".join([c.text for c in current] + [text])
+        pause = cue.start - current[-1].end if current else 0.0
+        finished = bool(current) and bool(re.search(r"[.!?]$", current[-1].text))
+        if current and (finished or len(trial) > max_chars
+                        or len(trial.split()) > max_words or pause > gap
+                        or cue.end - current[0].start > max_seconds):
+            groups.append(current)
+            current = []
+        current.append(cue)
+    if current:
+        groups.append(current)
+
+    out: list[Cue] = []
+    for group in groups:
+        start = group[0].start
+        end = min(group[-1].end + hold, start + max_seconds)
+        out.append(Cue(start, max(end, start + WORD_MIN),
+                       " ".join(c.text for c in group)))
+    return out
+
 
 def trusted_chars(words: list[Cue]) -> int:
     return sum(len(w.text) for w in words)

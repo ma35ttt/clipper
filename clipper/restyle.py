@@ -107,6 +107,27 @@ def plan_punches(cues, duration: float, style: styles_mod.Style) -> list[dict]:
     return punches
 
 
+def describe_cues(cues, max_words: int = 7, max_chars: int = 42) -> str:
+    """A short descriptive line from the opening words, for a top title.
+
+    Some looks (a letterbox reveal) want a statement about the clip rather than
+    a quote. The hook picker handles quotes, questions and chat consensus; when
+    it finds none, this falls back to the first useful clause so the style still
+    gets a title instead of silently rendering bare.
+    """
+    text = " ".join(str(cue.text) for cue in cues or ())
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"^(?:oh|bro|yo|like|and|so|um|uh)[ ,]+", "",
+                  text, flags=re.IGNORECASE)
+    words = text.split()
+    if not words:
+        return ""
+    line = " ".join(words[:max_words])
+    if len(line) > max_chars:
+        line = line[:max_chars].rsplit(" ", 1)[0]
+    return line.strip(" ,.!?-").upper()
+
+
 def _output_path(folder: Path, stem: str, style: str) -> Path:
     base = f"{stem}_{safe_name(style, 20) or 'style'}"
     path = folder / f"{base}.mp4"
@@ -141,7 +162,8 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
             else:
                 log(f"style: {clip.name} — no speech found ({note})")
 
-        caption_style = style.captions if style.captions != "off" else "pop"
+        caption_mode = style.captions if style.captions != "off" else "block"
+        caption_style = caption_mode if caption_mode in ("pop", "block") else "pop"
         emphasis = pick_emphasis(cues)
         punches = plan_punches(cues, prepared.duration, style)
 
@@ -166,6 +188,8 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
                 hook_cfg.title_mode = "fixed"
             title = pick_title(hook_cfg, meta.get("signals", {}) or {},
                                cues, meta.get("chat_excerpt", []) or [])
+            if not title and style.hook_fallback:
+                title = describe_cues(cues)
         if not title:
             title = str(meta.get("title") or "")
 
@@ -173,14 +197,23 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
         captured = str(meta.get("layout_used") or getattr(cfg, "layout", "split"))
         options = {
             "composed": True,
-            "composed_layout": "split" if captured == "split" else "vertical",
+            "composed_layout": captured,
             "caption_style": caption_style,
+            "caption_mode": caption_mode,
+            "caption_anchor": style.caption_anchor,
+            "caption_px": int(1080 * style.caption_size) if style.caption_size else 0,
+            "kicker": style.kicker,
+            "kicker_anchor": style.kicker_anchor,
+            "kicker_px": int(1080 * style.kicker_size) if style.kicker_size else 0,
+            "colour_emphasis": style.colour_emphasis,
             "subs_backend": style.backend,
             "caption_fill": style.caption_fill,
             "emphasis_fill": style.emphasis_fill,
             "emphasis": emphasis,
             "punchins": punches,
             "hook_fill": style.hook_fill,
+            "hook_anchor": style.hook_anchor,
+            "hook_size": style.hook_size,
         }
         if should_stop():
             return None

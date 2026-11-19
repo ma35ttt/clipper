@@ -30,7 +30,8 @@ from clipper import voice  # noqa: E402
 from clipper import vod as vod_mod  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
-from clipper.cutter import (Cutter, chat_reaction, hook_from_chat,  # noqa: E402
+from clipper.cutter import (Cutter, caption_anchor_y, chat_reaction,  # noqa: E402
+                            duo_geometry, duo_graph, hook_from_chat,
                             hook_from_cues, hook_keyword, hook_question,
                             pick_title, split_geometry, split_graph)
 from clipper.engine import Engine  # noqa: E402
@@ -1653,12 +1654,30 @@ class StyleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             names = {row["name"] for row in styles.catalogue(Path(tmp))}
         self.assertTrue({"clean", "hype", "cinematic", "podcast", "raw"} <= names)
+        self.assertTrue({"story", "story-karaoke", "meme", "reveal",
+                         "karaoke"} <= names)
 
     def test_unknown_style_falls_back_to_clean(self):
         from clipper import styles
 
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(styles.resolve("does-not-exist", Path(tmp)).name, "clean")
+
+    def test_reference_styles_carry_their_caption_treatment(self):
+        from clipper import styles
+
+        with tempfile.TemporaryDirectory() as tmp:
+            story = styles.resolve("story", Path(tmp))
+            karaoke = styles.resolve("karaoke", Path(tmp))
+            reveal = styles.resolve("reveal", Path(tmp))
+        self.assertEqual(story.captions, "static")
+        self.assertEqual(story.caption_anchor, "seam")
+        self.assertEqual(karaoke.captions, "word")
+        self.assertTrue(karaoke.colour_emphasis)
+        self.assertFalse(karaoke.hook)
+        self.assertEqual(reveal.captions, "off")
+        self.assertTrue(reveal.hook_fallback)
+        self.assertEqual(reveal.hook_anchor, "top")
 
     def test_ass_file_keeps_subtitles_white(self):
         cues = transcribe.Cues(
@@ -1676,6 +1695,105 @@ class StyleTest(unittest.TestCase):
         self.assertIn("THIS IS MOMENT", text)
         self.assertIn("&H00FFFFFF&", text)          # white primary
         self.assertNotIn("&H003FD2FF&", text.split("[Events]")[1])  # no gold subs
+
+    def test_ass_static_holds_whole_sentences(self):
+        cues = transcribe.Cues(
+            [transcribe.Cue(0.2, 2.0, "THIS IS THE FIRST THOUGHT"),
+             transcribe.Cue(2.1, 4.0, "AND IT KEEPS GOING")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "story.ass"
+            self.assertTrue(caption.build_ass(
+                cues, path, mode="static", align="top", y=1390))
+            text = path.read_text()
+        events = text.split("[Events]")[1]
+        self.assertEqual(events.count("Dialogue:"), 1)
+        self.assertIn(r"\an8", events)
+        self.assertIn(r"\pos(540,1390)", events)
+        self.assertIn(r"\N", events)                # explicit balanced break
+        self.assertIn("THIS IS THE FIRST", events)
+        self.assertIn("THOUGHT AND IT KEEPS", events)
+
+    def test_ass_word_mode_puts_one_word_per_line(self):
+        cues = transcribe.Cues(
+            [transcribe.Cue(0.2, 1.0, "THE MOMENT")],
+            [transcribe.Cue(0.2, 0.6, "THE"),
+             transcribe.Cue(0.6, 1.0, "MOMENT")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "word.ass"
+            self.assertTrue(caption.build_ass(
+                cues, path, mode="word", align="center", y=940,
+                colour_emphasis=True, emphasis=["moment"],
+                emphasis_fill="#FF7A1A"))
+            text = path.read_text()
+        events = text.split("[Events]")[1]
+        dialogues = [line for line in events.splitlines()
+                     if line.startswith("Dialogue:")]
+        self.assertEqual(len(dialogues), 2)
+        self.assertTrue(all(r"\fscx86" in line for line in dialogues))
+        self.assertIn(r"\c&H001A7AFF&", dialogues[1])
+        self.assertNotIn(r"\c&H001A7AFF&", dialogues[0])
+
+    def test_story_chunks_group_sentences_and_respect_pauses(self):
+        cues = [transcribe.Cue(0.2, 1.4, "this is a long first thought"),
+                transcribe.Cue(1.5, 2.9, "and it continues here"),
+                transcribe.Cue(4.2, 5.0, "a new sentence starts now.")]
+        chunks = transcribe.story_chunks(cues)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0].text,
+                         "this is a long first thought and it continues here")
+        self.assertEqual(chunks[1].start, 4.2)
+        self.assertGreaterEqual(chunks[1].end, 5.0)
+        self.assertLessEqual(chunks[1].end - chunks[1].start, 6.5)
+
+    def test_story_chunks_split_on_a_finished_sentence(self):
+        cues = [transcribe.Cue(0.2, 1.0, "first thing happened."),
+                transcribe.Cue(1.1, 2.0, "second thing happened.")]
+        chunks = transcribe.story_chunks(cues)
+        self.assertEqual([chunk.text for chunk in chunks],
+                         ["first thing happened.", "second thing happened."])
+
+    def test_duo_layout_fills_the_frame_below_the_camera(self):
+        geo = duo_geometry("1280:0:640:360")
+        self.assertEqual((geo.cam_h, geo.game_h), (840, 1080))
+        self.assertEqual(geo.crop, (0, 0, 1270, 1080))
+        parts = "\n".join(duo_graph("1280:0:640:360"))
+        self.assertIn("split=3", parts)
+        self.assertIn("vstack=inputs=2", parts)
+        self.assertIn("crop=1270:1080:0:0", parts)
+        self.assertNotIn("patchblur", parts)
+
+    def test_duo_layout_blurs_a_floating_camera_inset(self):
+        geo = duo_geometry("640:200:640:360")
+        self.assertIsNone(geo.crop)
+        parts = "\n".join(duo_graph("640:200:640:360"))
+        self.assertIn("split=4", parts)
+        self.assertIn("patchblur", parts)
+
+    def test_duo_graph_renders_a_frame(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "wide.mp4"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc2=size=1920x1080:rate=15:duration=1",
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", str(source)],
+                check=True)
+            for cam in ("1280:0:640:540", "640:200:640:540"):
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(source),
+                     "-filter_complex", ";".join(duo_graph(cam)),
+                     "-map", "[vbase]", "-frames:v", "1", "-f", "null", "-"],
+                    capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr[-400:])
+
+    def test_caption_anchors_follow_the_layout_seam(self):
+        self.assertEqual(caption_anchor_y("seam", "split"), (1380, "top"))
+        self.assertEqual(caption_anchor_y("seam", "duo"), (850, "top"))
+        self.assertEqual(caption_anchor_y("auto", "duo"), (850, "top"))
+        self.assertEqual(caption_anchor_y("middle", "duo"), (940, "center"))
+        self.assertEqual(caption_anchor_y("lower", "duo"), (1680, "bottom"))
 
     def test_punch_plan_stays_short_and_close(self):
         from clipper import restyle, styles
@@ -1740,6 +1858,28 @@ class StyleTest(unittest.TestCase):
                                    side_effect=AssertionError("whisper ran")):
                 engine._render(prepared, meta, False, [])
             self.assertTrue(meta.get("capture_only"))
+            self.assertTrue((tmp_path / "out" / meta["file"]).exists())
+
+    def test_duo_without_a_camera_falls_back_to_blur(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "wide.mp4"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc2=size=320x240:rate=15:duration=2",
+                 "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)],
+                check=True)
+            cfg = Config(input="x", out_dir=tmp_path / "out",
+                         work_dir=tmp_path / "work", layout="duo", cam="auto")
+            engine = Engine(cfg)
+            prepared = engine.cutter.prepare_window(source, 0, 2, "duo")
+            meta = {"stamp": "20261119-131000", "score": 0.6,
+                    "signals": {"t": 1.0}, "stream_start": 0.0,
+                    "stream_end": 2.0, "chat_excerpt": []}
+            engine._render(prepared, meta, False, [])
+            self.assertEqual(meta.get("layout_used"), "blur")
             self.assertTrue((tmp_path / "out" / meta["file"]).exists())
 
     def test_style_subcommands_are_wired(self):

@@ -140,8 +140,8 @@ Homebrew's regular `ffmpeg` bottle has no libass, so it cannot burn `.ass`
 captions. `ffmpeg-full` is keg-only and installs alongside it; clipper prefers it
 automatically. If it is missing, styled clips fall back to the PNG captions.
 
-macOS also gets **automatic webcam detection** for the `split` layout, using the
-system Vision framework. Nothing to install.
+macOS also gets **automatic webcam detection** for the `split` and `duo` layouts,
+using the system Vision framework. Nothing to install.
 
 ## Linux
 
@@ -154,9 +154,9 @@ There is no automatic webcam detection: pass `--cam x:y:w:h`, or use
 
 ## Windows and the webcam
 
-The `split` layout (webcam on top, gameplay in the middle, captions below) needs
-to know where the webcam sits in the source frame. On macOS clipper finds it by
-itself. On Windows it cannot, so you have two options:
+The camera layouts (`split` and `duo`) need to know where the webcam sits in the
+source frame. On macOS clipper finds it by itself. On Windows it cannot, so you
+have two options:
 
 - **Use the blurred layout** — it needs no webcam box and works everywhere:
 
@@ -282,16 +282,39 @@ and press **Style selected**.
 
 What a style controls:
 
-- **Captions** — popping chunks or block lines, burned with libass (`.ass`) when
-  the installed ffmpeg has it, PNG overlays otherwise. Subtitles stay white.
+- **Captions** — popping chunks, block lines, a held sentence (`static`), one
+  huge word at a time (`word`), or off. Burned with libass (`.ass`) when the
+  installed ffmpeg has it, PNG overlays otherwise. Subtitles stay white by
+  default; only `karaoke` colours a stressed word.
+- **Placement** — captions can sit at the `top`, `upper`, `middle`, `seam`,
+  `lower` or `bottom` of the frame. `seam` is the join between camera and
+  gameplay, which moves when the layout changes.
 - **Hook** — the same grounded source as live: repeated chat, a real question, a
-  quotable line, or nothing. Gold title face, black outline.
+  quotable line, or nothing. Gold title face, black outline. `reveal` uses a
+  calm white title at the top instead.
 - **Punch-ins** — 0–3 short crops (max 1.25x) on the stressed words. One-pass
   `crop`/`scale`, never `zoompan`.
 - **Cold open** — optional "payoff first, then rewind".
 - **Voice** — the live rung is available, but off in the built-in looks.
 
-Built-in looks: `clean`, `hype`, `cinematic`, `podcast`, `raw`.
+Built-in looks:
+
+| style | what it does | learned from |
+| --- | --- | --- |
+| `clean` | one punch-in, popping white captions, gold hook | default |
+| `hype` | three quick punch-ins, harder pacing | default |
+| `cinematic` | block captions, slow push-ins, no hook | default |
+| `podcast` | block captions, no hook, no punch-ins | default |
+| `raw` | no captions, no hook, no punch-ins | the capture itself |
+| `story` | one static white sentence held at the seam | wixxey, lacy |
+| `story-karaoke` | seam sentence plus one huge word over the camera | shadowzin |
+| `meme` | three-line white caption in the lower third | jirolfs |
+| `reveal` | persistent white top title, no spoken captions | ViceDetail |
+| `karaoke` | one huge uppercase word, coloured on the beat | the GTA 6 Short |
+
+The reference-derived looks are explained in
+[docs/REFERENCES.md](docs/REFERENCES.md): the clips, what was measured, what was
+borrowed and what was deliberately not.
 
 ## Styles from reference reels
 
@@ -442,6 +465,7 @@ The full 14-day plan, title formulas and the reused-content reasoning are in
 
 ```bash
 --layout split        # default: webcam on top, gameplay, captions below
+--layout duo          # webcam on top, gameplay fills below, captions at the seam
 --layout blur         # 9:16, blurred fill behind the full frame
 --layout vertical     # 9:16 centre crop
 --layout horizontal   # leave it 16:9
@@ -452,11 +476,16 @@ underneath, and a blurred band below for the captions and the hook. The gameplay
 is cropped away from the webcam side, so the game fills more of the frame and the
 duplicate face is not shown twice.
 
+`duo` is the reference-reel frame: the webcam gets the top 840 px and the gameplay
+fills the remaining 1080 px edge to edge, with no caption band. Captions are
+drawn over the join, which is where most of the reference clips put them. If a
+style uses `seam` placement, `duo` resolves that to y=850 and `split` to y=1380.
+
 The webcam box is a **face crop**: a little room under the chin, and the box
 shrinks rather than slides when the camera is against a frame edge. A band
 stretched more than about 2x gets a light sharpen so a small webcam does not look
-mushy next to crisp gameplay. If no webcam is found, `split` falls back to the
-blurred frame and the worker log says so.
+mushy next to crisp gameplay. If no webcam is found, `split` and `duo` fall back
+to the blurred frame and the worker log says so.
 
 ## Captions
 

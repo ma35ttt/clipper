@@ -330,6 +330,26 @@ class SplitGeometry:
     crop: tuple[int, int, int, int] | None = None
 
 
+def _side_crop(cam: str = DEFAULT_CAM, src_w: int = 1920,
+               src_h: int = 1080) -> tuple[int, int, int, int] | None:
+    """The gameplay crop that removes a webcam pinned to a frame edge."""
+    x, y, w, h = parse_cam(cam)
+    src_w = int(src_w or 1920)
+    src_h = int(src_h or 1080)
+    pad = 10
+    if x >= src_w * 0.6:
+        # Webcam on the right: keep everything to the left of it.
+        width = _even(max(src_w * 0.55, x - pad))
+        if width >= src_w * 0.55:
+            return (0, 0, width, src_h)
+    elif x + w <= src_w * 0.4:
+        # Webcam on the left: keep everything to the right of it.
+        left = _even(min(x + w + pad, src_w * 0.45))
+        if src_w - left >= src_w * 0.55:
+            return (left, 0, _even(src_w - left), src_h)
+    return None
+
+
 def split_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
                    src_h: int = 1080) -> SplitGeometry:
     """Work out the three bands, cropping the game away from the webcam side.
@@ -341,22 +361,7 @@ def split_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
     frame. If the inset floats in the middle, the frame is kept whole and the
     inset is blurred out (the old behaviour).
     """
-    x, y, w, h = parse_cam(cam)
-    src_w = int(src_w or 1920)
-    src_h = int(src_h or 1080)
-    pad = 10
-    crop: tuple[int, int, int, int] | None = None
-
-    if x >= src_w * 0.6:
-        # Webcam on the right: keep everything to the left of it.
-        width = _even(max(src_w * 0.55, x - pad))
-        if width >= src_w * 0.55:
-            crop = (0, 0, width, src_h)
-    elif x + w <= src_w * 0.4:
-        # Webcam on the left: keep everything to the right of it.
-        left = _even(min(x + w + pad, src_w * 0.45))
-        if src_w - left >= src_w * 0.55:
-            crop = (left, 0, _even(src_w - left), src_h)
+    crop = _side_crop(cam, src_w, src_h)
 
     if crop:
         cw, ch = crop[2], crop[3]
@@ -367,6 +372,19 @@ def split_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
 
     return SplitGeometry(SPLIT_CAM_H, SPLIT_GAME_H,
                          1920 - SPLIT_CAM_H - SPLIT_GAME_H, None)
+
+
+# `--layout duo` is the reference-reel frame: a big camera band on top and the
+# gameplay filling the rest, with no filler strip. Story captions sit at the
+# seam instead of in a dedicated band.
+DUO_CAM_H = 840
+DUO_GAME_H = 1080
+
+
+def duo_geometry(cam: str = DEFAULT_CAM, src_w: int = 1920,
+                 src_h: int = 1080) -> SplitGeometry:
+    crop = _side_crop(cam, src_w, src_h)
+    return SplitGeometry(DUO_CAM_H, DUO_GAME_H, 0, crop)
 
 
 def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
@@ -433,6 +451,81 @@ def split_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
     parts.append("[top][game]vstack=inputs=2[tg]")
     parts.append("[tg][bot]vstack=inputs=2[vbase]")
     return parts
+
+
+def duo_graph(cam: str = DEFAULT_CAM, src_w: int = 1920,
+              src_h: int = 1080) -> list[str]:
+    """Filter parts for cam-on-top / gameplay-below, with no filler band.
+
+    This is the reference-reel frame: the camera gets the top 44%, the game
+    fills the rest edge to edge. Captions are drawn over the seam by the
+    renderer, so there is no empty strip for them to live in.
+    """
+    geo = duo_geometry(cam, src_w, src_h)
+    x, y, w, h = parse_cam(cam)
+    crop = f"crop={w}:{h}:{x}:{y}"
+    sharpen = ""
+    if h > 0 and geo.cam_h / h >= 2.2:
+        sharpen = ",unsharp=5:5:0.8:5:5:0.0"
+
+    parts = [
+        "[0:v]split=3[c1][c2][c3]" if geo.crop
+        else "[0:v]split=4[c1][c2][c3][c4]",
+        f"[c1]{crop},scale=1080:{geo.cam_h}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{geo.cam_h},gblur=sigma=18,eq=brightness=-0.2[cambg]",
+        f"[c2]{crop},scale=-2:{geo.cam_h}{sharpen}[camfg]",
+        "[cambg][camfg]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setsar=1[top]",
+    ]
+
+    if geo.crop:
+        cx, cy, cw, ch = geo.crop
+        parts.append(
+            f"[c3]crop={cw}:{ch}:{cx}:{cy},"
+            f"scale=1080:{geo.game_h}:force_original_aspect_ratio=increase,"
+            f"crop=1080:{geo.game_h},format=yuv420p,setsar=1[game]"
+        )
+    else:
+        scale = max(1080 / (src_w or 1920), 1080 / (src_h or 1080))
+        off_x = (src_w * scale - 1080) / 2
+        off_y = (src_h * scale - 1080) / 2
+        sx, sy = _even(max(0, x - 6)), _even(max(0, y - 6))
+        sw, sh = _even(w + 12), _even(h + 12)
+        ox = _even(max(0, sx * scale - off_x))
+        oy = _even(max(0, sy * scale - off_y))
+        ow, oh = _even(sw * scale), _even(sh * scale)
+        parts.append(
+            f"[c3]scale=1080:{geo.game_h}:force_original_aspect_ratio=increase,"
+            f"crop=1080:{geo.game_h}[game0]"
+        )
+        parts.append(
+            f"[c4]crop={sw}:{sh}:{sx}:{sy},scale={ow}:{oh},gblur=sigma=8[patchblur]"
+        )
+        parts.append(
+            f"[game0][patchblur]overlay={ox}:{oy},format=yuv420p,setsar=1[game]"
+        )
+    parts.append("[top][game]vstack=inputs=2,format=yuv420p,setsar=1[vbase]")
+    return parts
+
+
+# Caption anchors in 1080x1920 pixels. ``seam`` is resolved per layout because
+# a duo frame joins camera and gameplay much higher than a split frame.
+def caption_anchor_y(anchor: str, layout: str = "vertical") -> tuple[int, str]:
+    """Pixel y and ASS alignment (top/center/bottom) for a caption anchor."""
+    seam = {"split": 1380, "duo": DUO_CAM_H + 10}.get(layout, 1380)
+    anchor = (anchor or "auto").lower()
+    if anchor == "auto":
+        anchor = "seam"
+    if anchor == "top":
+        return 112, "top"
+    if anchor == "upper":
+        return 620, "center"
+    if anchor == "middle":
+        return 940, "center"
+    if anchor == "lower":
+        return 1680, "bottom"
+    if anchor == "bottom":
+        return 1856, "bottom"
+    return seam, "top"
 
 
 class Cutter:
@@ -808,6 +901,15 @@ class Cutter:
         opts = dict(options or {})
         composed = bool(opts.get("composed"))
         style = opts.get("caption_style") or self.caption_style()
+        caption_mode = opts.get("caption_mode") or style
+        if caption_mode not in ("pop", "block", "static", "word"):
+            caption_mode = "pop"
+        caption_anchor = str(opts.get("caption_anchor") or "auto").lower()
+        caption_px = int(opts.get("caption_px") or 0)
+        colour_emphasis = bool(opts.get("colour_emphasis"))
+        kicker = bool(opts.get("kicker"))
+        kicker_anchor = str(opts.get("kicker_anchor") or "seam").lower()
+        kicker_px = int(opts.get("kicker_px") or 0)
         caption_fill = opts.get("caption_fill") or "white"
         emphasis_fill = opts.get("emphasis_fill") or caption.HOOK_FILL
         emphasis = {re.sub(r"[^a-z0-9]", "", str(w).lower())
@@ -830,7 +932,7 @@ class Cutter:
             cam = self.cam_spec()
             # No detected webcam means there is nothing to put across the top:
             # show the blurred 9:16 frame instead of cropping a guessed region.
-            layout = "blur" if cfg.layout == "split" and not cam else cfg.layout
+            layout = "blur" if cfg.layout in ("split", "duo") and not cam else cfg.layout
             vertical = layout != "horizontal"
             if layout == "horizontal" and not title and not cues:
                 return "", False, []
@@ -861,6 +963,8 @@ class Cutter:
             parts.append("[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1[vbase]")
         elif layout == "split":
             parts.extend(split_graph(cam, prepared.width, prepared.height))
+        elif layout == "duo":
+            parts.extend(duo_graph(cam, prepared.width, prepared.height))
         else:
             parts.append("[0:v]setsar=1[vbase]")
 
@@ -870,7 +974,8 @@ class Cutter:
         geo = (split_geometry(cam, prepared.width, prepared.height)
                if layout == "split" and not composed else None)
         sub_margin = 64 if vertical else 40
-        sub_ratio = 0.095 if style == "pop" else 0.062
+        sub_ratio = {"pop": 0.095, "block": 0.062, "static": 0.050,
+                     "word": 0.115}.get(caption_mode, 0.062)
         sub_estimate = (int(1080 * sub_ratio * 1.7) if vertical else 160)
         game_bottom = (geo.cam_h + geo.game_h) if geo else (1920 if composed else 1920)
 
@@ -905,7 +1010,8 @@ class Cutter:
                      pop: bool = False, font: str | None = None,
                      fill: str = "white",
                      char_width: float = 0.56,
-                     emoji: bool = False) -> tuple[int, int]:
+                     emoji: bool = False,
+                     max_lines: int = 2) -> tuple[int, int]:
             """Rasterise one overlay and register it as the next ffmpeg input."""
             drawn = None
             # Real outlined font when ImageMagick is around, bitmap otherwise.
@@ -915,6 +1021,7 @@ class Cutter:
                                                cap_px=font_px, fill=fill)
                 else:
                     drawn = caption.render_styled(text, font_px, path, max_width,
+                                                  max_lines=max_lines,
                                                   font=font, fill=fill,
                                                   char_width=char_width,
                                                   emoji=emoji)
@@ -963,7 +1070,8 @@ class Cutter:
                 )
                 current = "vdraw"
             else:
-                font_px = int(1080 * 0.068) if vertical else int(max(320, prepared.height or 720) * 0.10)
+                font_px = int(1080 * float(opts.get("hook_size") or 0.068)) if vertical \
+                    else int(max(320, prepared.height or 720) * 0.10)
                 max_width = int((1080 if vertical else (prepared.width or 1280)) * 0.9)
                 if vertical:
                     # Keep the hook on one line: the band under the game is
@@ -987,53 +1095,126 @@ class Cutter:
                     # baked in: park the hook at the top of it and the subtitles
                     # at the bottom.
                     x = "(main_w-overlay_w)/2"
-                    y = "main_h*0.715" if layout == "split" else "main_h*0.085"
+                    if opts.get("hook_anchor") == "top":
+                        y = "main_h*0.045"
+                    elif layout == "duo":
+                        # Just under the camera/gameplay seam, not over the face.
+                        y = "main_h*0.46"
+                    else:
+                        y = "main_h*0.715" if layout == "split" else "main_h*0.085"
                 else:
                     x, y = caption.overlay_expr(layout, style)
                 overlay_png(x, y)
 
         drew_ass = False
+        anchored = (caption_anchor not in ("", "auto")
+                    or caption_mode in ("static", "word"))
+        if anchored:
+            if caption_anchor in ("", "auto"):
+                caption_anchor = "seam"
+            ass_y, ass_align = caption_anchor_y(caption_anchor, layout)
+        else:
+            # The original look, unchanged for clean/hype/podcast: popping
+            # chunks in the band, block lines a little higher.
+            ass_y, ass_align = (1775 if layout == "split" else 1540), "center"
+        ass_px = caption_px or int(1080 * sub_ratio)
+
+        def burn(source: Path, label: str) -> None:
+            nonlocal current
+            escaped = (str(source.resolve())
+                       .replace("\\", "\\\\").replace(":", "\\:")
+                       .replace("'", "\\'"))
+            parts.append(f"[{current}]ass=filename='{escaped}'[{label}]")
+            current = label
+
         if cues and backend == "ass" and caption.ass_available():
-            ass_y = 1775 if layout == "split" else 1540
             ass_path = prepared.work / "subs.ass"
             drew_ass = caption.build_ass(
                 cues, ass_path,
                 font=opts.get("ass_font") or "Arial",
-                font_px=int(opts.get("ass_font_px")
-                            or (1080 * sub_ratio)),
+                font_px=ass_px,
                 fill=caption_fill,
                 outline=opts.get("caption_outline") or "#000000",
-                # Subtitles stay white in every style; emphasis is expressed by
-                # the punch-in on that word, not by recolouring the caption.
-                emphasis=(),
+                # White unless a reference-derived style asks for a coloured
+                # beat word; the original styles express stress with punch-ins.
+                emphasis=opts.get("emphasis") if colour_emphasis else (),
                 emphasis_fill=emphasis_fill,
                 y=ass_y,
-                pop=(style == "pop"),
+                mode=caption_mode,
+                align=ass_align,
+                colour_emphasis=colour_emphasis,
                 max_width=int(1080 * 0.92),
             )
             if drew_ass:
-                escaped = (str(ass_path.resolve())
-                           .replace("\\", "\\\\").replace(":", "\\:")
-                           .replace("'", "\\'"))
-                parts.append(f"[{current}]ass=filename='{escaped}'[vass]")
-                current = "vass"
+                burn(ass_path, "vass")
+                if kicker and caption_mode == "word":
+                    kick_y, kick_align = caption_anchor_y(kicker_anchor, layout)
+                    kick_path = prepared.work / "kicker.ass"
+                    if caption.build_ass(
+                            cues, kick_path,
+                            font=opts.get("ass_font") or "Arial",
+                            font_px=kicker_px or int(1080 * 0.044),
+                            fill="#FFFFFF",
+                            y=kick_y, mode="static", align=kick_align,
+                            max_width=int(1080 * 0.92)):
+                        burn(kick_path, "vkicker")
 
         if cues and not drew_ass:
-            shown = transcribe.pop_chunks(cues) if style == "pop" else cues
+            if caption_mode == "pop":
+                shown = transcribe.pop_chunks(cues)
+            elif caption_mode == "word":
+                shown = (list(getattr(cues, "words", ()) or ())
+                         or transcribe.word_timings(list(cues)))
+            elif caption_mode == "static":
+                shown = transcribe.story_chunks(cues)
+            else:
+                shown = list(cues)
             base = 1080 if vertical else max(320, prepared.width or 1280)
             max_width = int((1080 if vertical else (prepared.width or 1280)) * 0.92)
-            font_px = int(base * sub_ratio)
-            if geo or (composed and layout == "split"):
+            font_px = caption_px or int(base * sub_ratio)
+            if anchored:
+                x = "(main_w-overlay_w)/2"
+                if ass_align == "top":
+                    y = str(ass_y)
+                elif ass_align == "bottom":
+                    y = f"{ass_y}-overlay_h"
+                else:
+                    y = f"{ass_y}-overlay_h/2"
+            elif geo or (composed and layout == "split"):
                 x, y = "(main_w-overlay_w)/2", f"main_h-{sub_margin}-overlay_h"
             else:
                 x, y = caption.subtitle_expr(layout, style)
+            hot = (emphasis if colour_emphasis else set())
             for position, cue in enumerate(shown):
+                fill = caption_fill
+                if caption_mode == "word" and hot:
+                    key = re.sub(r"[^a-z0-9]", "", cue.text.lower())
+                    if key in hot:
+                        fill = emphasis_fill
                 draw_png(
                     cue.text, prepared.work / f"sub_{position:03d}.png",
-                    font_px, max_width, pop=(style == "pop"),
-                    fill=caption_fill,
+                    font_px, max_width, pop=(caption_mode == "pop"),
+                    fill=fill,
+                    max_lines=1 if caption_mode == "word"
+                    else 3 if caption_mode == "static" else 2,
                 )
                 overlay_png(x, y, window=(cue.start, cue.end))
+            if kicker and caption_mode == "word":
+                kick_y, kick_align = caption_anchor_y(kicker_anchor, layout)
+                if kick_align == "top":
+                    ky = str(kick_y)
+                elif kick_align == "bottom":
+                    ky = f"{kick_y}-overlay_h"
+                else:
+                    ky = f"{kick_y}-overlay_h/2"
+                for position, cue in enumerate(transcribe.story_chunks(cues)):
+                    draw_png(
+                        cue.text, prepared.work / f"kick_{position:03d}.png",
+                        kicker_px or int(base * 0.044), max_width,
+                        fill="#FFFFFF", max_lines=3,
+                    )
+                    overlay_png("(main_w-overlay_w)/2", ky,
+                                window=(cue.start, cue.end))
 
         parts.append(f"[{current}]null[vout]")
         return ";".join(parts), True, extra

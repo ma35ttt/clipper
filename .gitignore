@@ -22,5 +22,8 @@ demo/*.jpg
 demo/*.png
 demo/*.wav
 
+# downloaded reference reels and their extracted frames (analysis only)
+demo/references/
+
 # local docs tooling
 .venv-doc/

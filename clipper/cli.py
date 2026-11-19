@@ -32,7 +32,9 @@ def _add_run_args(p: argparse.ArgumentParser, include_source: bool = True) -> No
     p.add_argument("--out", default="clips", help="where clips are written (default: clips)")
     p.add_argument("--work", default=".clipper", help="scratch directory (default: .clipper)")
     p.add_argument("--profile", choices=sorted(PRESETS), help="trigger tuning preset")
-    p.add_argument("--layout", choices=LAYOUTS, help="output framing (default: split)")
+    p.add_argument("--layout", choices=LAYOUTS,
+                   help="output framing (default: split; duo is camera top, "
+                        "gameplay filling the rest, with no caption band)")
     p.add_argument("--cam",
                    help="webcam box x:y:w:h in source pixels for --layout split, or "
                         "'auto' to detect the streamer's face and follow them "

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-LAYOUTS = ("horizontal", "vertical", "blur", "split")
+LAYOUTS = ("horizontal", "vertical", "blur", "split", "duo")
 TITLE_MODES = ("auto", "none", "fixed")
 SUBS_MODES = ("auto", "on", "off")
 VERIFY_MODES = ("auto", "on", "off")

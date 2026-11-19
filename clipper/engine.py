@@ -854,7 +854,7 @@ class Engine:
 
     def _start_cam_watch(self) -> None:
         """Start following the streamer's webcam when --cam auto is in force."""
-        if self._cam_setting != "auto" or self.cfg.layout != "split":
+        if self._cam_setting != "auto" or self.cfg.layout not in ("split", "duo"):
             return
         from . import camera
 
@@ -1216,11 +1216,11 @@ class Engine:
         chat_for_hooks = (chat_window if chat_window is not None
                           else meta.get("chat_excerpt", []))
         try:
-            if self.cfg.layout == "split" and not self.cutter.cam_spec() \
+            if self.cfg.layout in ("split", "duo") and not self.cutter.cam_spec() \
                     and not self._warned_no_cam:
                 self._warned_no_cam = True
                 self.log("no webcam box — this clip uses the blurred frame instead "
-                         "of the split layout (camera detection has not found a face)")
+                         "of the camera layout (camera detection has not found a face)")
             # The cold open and the voiceover need words even when the clip
             # is not burning captions, so transcribe for them too, then keep
             # the transcript out of the render when subtitles are off.
@@ -1275,8 +1275,8 @@ class Engine:
             # chat excerpt exist: a repeated chat phrase wins, then a quotable line.
             cam = self.cutter.cam_spec()
             meta["cam"] = cam or "none"
-            meta["layout_used"] = ("split" if (self.cfg.layout == "split" and cam)
-                                   else "blur" if self.cfg.layout == "split"
+            meta["layout_used"] = ("blur" if (self.cfg.layout in ("split", "duo")
+                                   and not cam)
                                    else self.cfg.layout)
             meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
                                        chat_for_hooks)
