@@ -195,9 +195,10 @@ your machine only; nothing is exposed to the network.
   console.
 - **Clip a past stream** — paste a finished Twitch VOD or YouTube link and clipper
   analyses the whole thing and cuts its best moments (see below).
-- **Drop a local recording** — drop an MP4/MOV/MKV from Finder on the same card,
-  or press **Select from local**. It is stored under `.clipper/uploads/` and
-  clipped exactly like a pasted link. Nothing leaves your machine.
+- **Drop raw clips** — drag MP4/MOV/MKV files from Finder onto the drop zone in
+  the clips section, or press **Select from local**. They are normalized to MP4,
+  filed on the wall, and can be ticked and styled like any capture. Nothing
+  leaves your machine.
 - **Update** — pull the newest version from GitHub without leaving the page.
 - **Clip wall** — play, download, copy the path, or delete each clip.
 
@@ -256,12 +257,9 @@ Useful extras:
 ```
 
 `vod` is also a button on the console: paste a past-stream link into **Clip a
-past stream** and watch the progress bar in the panel. The same card accepts a
-recording from your Mac — drag it from Finder onto the drop zone, or press
-**Select from local**. The browser sends the file to the console, which stores it
-in `<work>/uploads/` and runs the normal VOD pass. Several dropped files are
-queued and clipped one after another. Files live in that folder after the run so
-you can press **Clip past stream** again for the next batch.
+past stream** and watch the progress bar in the panel. To mine a recording that
+is already on disk without pasting its path, use the command line:
+`python3 -m clipper vod "/path/to/recording.mp4"`.
 
 ---
 
@@ -287,6 +285,13 @@ A styled copy lands beside the capture as `<name>_<style>.mp4`; the original is
 never overwritten. The sidecar records the transcript, the hook and the punch-in
 plan. On the console, tick the clips in **clips**, choose a style in the dropdown
 and press **Style selected**.
+
+To style a clip that did not come from a live run, drag it from Finder onto the
+drop zone above the clip wall (or press **Select from local**). The browser
+streams the file to the console, which normalizes it to MP4 and files it on the
+wall with a `raw` tag. Tick it, pick a look, and press **Style selected** — the
+same transcription, hook and punch-in path as a capture. The clip keeps its own
+frame; a portrait capture uses the console's current layout for seam placement.
 
 What a style controls:
 
@@ -323,6 +328,38 @@ Built-in looks:
 The reference-derived looks are explained in
 [docs/REFERENCES.md](docs/REFERENCES.md): the clips, what was measured, what was
 borrowed and what was deliberately not.
+
+### Make your own look
+
+A style is a small JSON file, so you can tune one to your taste without touching
+Python. Save it as `.clipper/styles/my-look.json` in the folder you run clipper
+from, and it appears in the console dropdown and works by name:
+
+```json
+{
+  "name": "my-look",
+  "label": "My look",
+  "note": "White block captions at the seam, no hook.",
+  "hook": false,
+  "captions": "block",
+  "caption_anchor": "seam",
+  "caption_fill": "#FFFFFF",
+  "caption_size": 0.05,
+  "punch_count": 1,
+  "punch_zoom": 1.10
+}
+```
+
+```bash
+cd ~/clipper
+python3 -m clipper style clips/name.mp4 --style my-look
+```
+
+Only the keys you set are used; everything else stays at the default. Pick
+`captions` from `pop`, `block`, `static`, `word` or `off`, and place them at
+`top`, `upper`, `middle`, `seam`, `lower` or `bottom`. `punch_count` is 0–3 and
+`punch_zoom` is capped at 1.25. Give your file a name that is not a built-in so
+it sits alongside the presets, and change only the values you care about.
 
 ## Styles from reference reels
 

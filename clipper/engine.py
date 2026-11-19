@@ -1429,7 +1429,7 @@ class Engine:
             files = []
         for path in files:
             entry = {"file": path.name, "title": "", "score": 0,
-                     "styled": False, "style": ""}
+                     "styled": False, "style": "", "uploaded": False}
             side = path.with_suffix(".json")
             if side.exists():
                 try:
@@ -1438,6 +1438,7 @@ class Engine:
                     entry["score"] = int(round(float(data.get("score", 0)) * 100))
                     entry["styled"] = bool(data.get("styled_from"))
                     entry["style"] = data.get("style") or ""
+                    entry["uploaded"] = data.get("source") == "upload"
                 except (OSError, ValueError):
                     pass
             clips.append(entry)

@@ -1440,6 +1440,7 @@ class DashboardTest(unittest.TestCase):
                     "uploadbar", "uploadfill", "uploadnote"):
             self.assertIn(key, ids, key)
         self.assertIn("Select from local", PAGE)
+        self.assertIn("Drop raw clips here", PAGE)
         self.assertIn("queueLocal(", PAGE)
         self.assertIn("type=\"file\"", PAGE)
 
@@ -1476,11 +1477,11 @@ class DashboardTest(unittest.TestCase):
 
 
 class UploadTest(unittest.TestCase):
-    """Dropping a local recording streams bytes into <work>/uploads."""
+    """Dropping a raw clip files it on the wall, ready for styling."""
 
     class _Engine:
-        def __init__(self, work_dir: Path):
-            self.cfg = types.SimpleNamespace(work_dir=work_dir)
+        def __init__(self, work_dir: Path, out_dir: Path):
+            self.cfg = types.SimpleNamespace(work_dir=work_dir, out_dir=out_dir)
             self.logs: list[str] = []
 
         def log(self, message: str) -> None:
@@ -1510,7 +1511,7 @@ class UploadTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            work = root / "work"
+            out = root / "clips"
             source = root / "source.mp4"
             subprocess.run(
                 ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
@@ -1519,7 +1520,7 @@ class UploadTest(unittest.TestCase):
                  "-pix_fmt", "yuv420p", str(source)],
                 check=True)
             payload = source.read_bytes()
-            engine = self._Engine(work)
+            engine = self._Engine(root / "work", out)
             handler = type("UploadHandler", (_Handler,), {
                 "engine": engine, "clips_dir": root / "clips",
             })
@@ -1544,13 +1545,31 @@ class UploadTest(unittest.TestCase):
                 status, data = post("My Clip.MP4", payload)
                 self.assertEqual(status, 200, data)
                 self.assertTrue(data.get("ok"), data)
-                self.assertEqual(data.get("stem"), "My_Clip")
-                stored = Path(data["path"])
+                self.assertEqual(data.get("file"), "My_Clip.mp4")
+                self.assertEqual(data.get("title"), "My Clip")
+                stored = out / data["file"]
                 self.assertTrue(stored.exists())
-                self.assertEqual(stored.parent.name, "uploads")
                 self.assertGreater(data.get("duration") or 0, 0.5)
-                self.assertEqual(stored.stat().st_size, len(payload))
-                self.assertTrue(engine.logs)
+                self.assertEqual((data.get("width"), data.get("height")),
+                                 (320, 240))
+                self.assertEqual(data.get("layout"), "horizontal")
+
+                side = stored.with_suffix(".json")
+                self.assertTrue(side.exists())
+                meta = json.loads(side.read_text())
+                self.assertEqual(meta.get("source"), "upload")
+                self.assertEqual(meta.get("layout_used"), "horizontal")
+                self.assertEqual(meta.get("title"), "My Clip")
+                self.assertEqual(meta.get("score"), 0)
+                self.assertTrue(any("raw clip added" in line
+                                    for line in engine.logs))
+
+                # Dropping the same name again must not overwrite the first.
+                status, again = post("My Clip.MP4", payload)
+                self.assertEqual(status, 200, again)
+                self.assertEqual(again.get("file"), "My_Clip-2.mp4")
+                self.assertTrue((out / "My_Clip-2.mp4").exists())
+                self.assertTrue((out / "My_Clip.mp4").exists())
 
                 status, data = post("notes.txt", b"hello")
                 self.assertEqual(status, 400, data)
@@ -1573,7 +1592,7 @@ class UploadTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            engine = self._Engine(root / "work")
+            engine = self._Engine(root / "work", root / "clips")
             handler = type("UploadHandler", (_Handler,), {
                 "engine": engine, "clips_dir": root / "clips",
             })

@@ -190,7 +190,9 @@ def style_clip(cfg, clip: Path, style: styles_mod.Style, log,
                                cues, meta.get("chat_excerpt", []) or [])
             if not title and style.hook_fallback:
                 title = describe_cues(cues)
-        if not title:
+        if style.hook and not title:
+            # A look with no hook stays clean even when the source clip already
+            # carries a title from the live trigger.
             title = str(meta.get("title") or "")
 
         out = _output_path(clip.parent, clip.stem, style.name)

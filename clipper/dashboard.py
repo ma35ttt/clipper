@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .util import probe, safe_name
+from .util import FFMPEG, probe, run, safe_name
 
 # Recordings dropped on the dashboard are streamed straight to disk, so the
 # usual 1 MB JSON limit does not apply. These are the containers ffmpeg can
@@ -29,6 +29,7 @@ UPLOAD_EXTS = frozenset({
 })
 UPLOAD_LIMIT = 32 * 1024 ** 3      # 32 GB is more than a 12-hour recording
 UPLOAD_RESERVE = 1 * 1024 ** 3     # keep a gigabyte free after the write
+_IMPORT_LOCK = threading.Lock()    # one drop lands on the wall at a time
 
 
 def upload_name(raw: str) -> tuple[str, str]:
@@ -47,6 +48,52 @@ def upload_name(raw: str) -> tuple[str, str]:
     raw_stem = Path(name).stem
     stem = safe_name(raw_stem, 60) if raw_stem.strip(" ._-") else "recording"
     return stem, suffix
+
+
+def free_clip_name(out_dir: Path, stem: str) -> Path:
+    """A clip filename that does not collide with an existing clip or sidecar."""
+    path = out_dir / f"{stem}.mp4"
+    index = 2
+    while path.exists() or path.with_suffix(".json").exists():
+        path = out_dir / f"{stem}-{index}.mp4"
+        index += 1
+    return path
+
+
+def normalize_clip(raw: Path, out: Path, info: dict) -> str:
+    """Put an uploaded clip in an MP4 the browser and the styler can both use.
+
+    H.264/AAC is remuxed (a few seconds, no quality loss). Anything else is
+    re-encoded once, because the clip wall plays MP4 and the styling pass looks
+    for ``.mp4`` files. Returns an empty string on success, or ffmpeg's last
+    error line.
+    """
+    copy_safe = (str(info.get("vcodec") or "").lower() == "h264"
+                 and str(info.get("acodec") or "").lower() in ("", "aac", "mp3"))
+    if copy_safe:
+        result = run(
+            [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(raw), "-map", "0:v:0", "-map", "0:a:0?",
+             "-c", "copy", "-sn", "-dn", "-movflags", "+faststart",
+             "-f", "mp4", str(out)],
+            timeout=1800,
+        )
+        if result.returncode == 0 and out.exists() and out.stat().st_size:
+            return ""
+        out.unlink(missing_ok=True)
+    result = run(
+        [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+         "-i", str(raw), "-map", "0:v:0", "-map", "0:a:0?",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+         "-sn", "-dn", "-movflags", "+faststart", "-f", "mp4", str(out)],
+        timeout=3600,
+    )
+    if result.returncode == 0 and out.exists() and out.stat().st_size:
+        return ""
+    out.unlink(missing_ok=True)
+    tail = (result.stderr or "").strip().splitlines()
+    return tail[-1] if tail else "ffmpeg could not convert the clip"
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -342,6 +389,7 @@ PAGE = """<!doctype html>
   .dropzone .dmain b { font-weight: 700; }
   .dropzone .dsub { color: var(--faint); font-size: 11.5px; }
   .dropzone .vnote { margin-top: 6px; }
+  .clipdrop { margin: 10px 0 14px; padding: 13px 16px; }
   .uploadbar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.07);
                overflow: hidden; margin-top: 10px; }
   .uploadbar > i { display: block; height: 100%; width: 0%; border-radius: 99px;
@@ -494,19 +542,6 @@ PAGE = """<!doctype html>
       <div class="vnote" id="vodnote">Analyses a finished stream and cuts up to 12 new moments. Run it again for the next batch — already-clipped moments are remembered per source.</div>
       <div class="vodbar hidden" id="vodbar"><i id="vodfill"></i></div>
       <div class="vodstatus hidden" id="vodstatus"><span id="vodphase">starting…</span><b id="vodcount"></b></div>
-      <div class="dropzone" id="dropzone" role="button" tabindex="0"
-           aria-label="Drop a recording here or select one from this Mac">
-        <div class="dmain">
-          <b>Drop a recording here</b>
-          <span class="dsub">or</span>
-          <button class="btn ghost" id="localfile" type="button">Select from local</button>
-        </div>
-        <div class="vnote">MP4, MOV, MKV, WebM, TS or AVI · analysed on this Mac, never uploaded anywhere else · needs about a minute of footage.</div>
-        <input type="file" id="fileinput" hidden multiple
-               accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.ts,.m2ts,.flv,.avi,.mpg,.mpeg,.wmv">
-      </div>
-      <div class="uploadbar hidden" id="uploadbar"><i id="uploadfill"></i></div>
-      <div class="uploadnote hidden" id="uploadnote"></div>
     </div>
   </section>
   <section class="panel">
@@ -541,6 +576,20 @@ PAGE = """<!doctype html>
         <span class="count" id="count">nothing yet</span>
       </div>
     </div>
+    <div class="dropzone clipdrop" id="dropzone" role="button" tabindex="0"
+         aria-label="Drop raw clips here or select them from this Mac">
+      <div class="dmain">
+        <b>Drop raw clips here</b>
+        <span class="dsub">or</span>
+        <button class="btn ghost" id="localfile" type="button">Select from local</button>
+        <span class="dsub">— they appear below, ready to style.</span>
+      </div>
+      <div class="vnote">MP4, MOV, MKV, WebM, TS or AVI · normalized to MP4 on this Mac · tick a clip and press Style selected.</div>
+      <input type="file" id="fileinput" hidden multiple
+             accept="video/*,.mp4,.m4v,.mov,.mkv,.webm,.ts,.m2ts,.flv,.avi,.mpg,.mpeg,.wmv">
+    </div>
+    <div class="uploadbar hidden" id="uploadbar"><i id="uploadfill"></i></div>
+    <div class="uploadnote hidden" id="uploadnote"></div>
     <div class="stylestatus hidden" id="stylestatus"><span id="stylenote"></span><b id="stylecount"></b></div>
     <div class="grid" id="wall"></div>
   </section>
@@ -567,10 +616,8 @@ let outDir = '';
 let autoOn = false;
 let recording = false;
 let settingsTimer = null;
-let vodRunning = false;
 let uploadBusy = false;
 let uploadQueue = [];
-let pendingLocal = [];
 const history = [];
 const MAXH = 90;
 let threshold = 0.62;
@@ -721,31 +768,29 @@ async function updateClipper() {
 }
 
 /* -- past streams (the VOD section) --------------------------------- */
-async function startVod(path, name) {
+async function startVod() {
   const input = $('vodinput');
-  const link = String(path || input.value || '').trim();
-  if (!link) { toast('paste a link or drop a recording first', true); return false; }
+  const link = input.value.trim();
+  if (!link) { toast('paste a link to a past stream first', true); return; }
   const btn = $('vodbtn');
   btn.disabled = true; btn.textContent = 'Starting...';
   const r = await postJSON('/api/vod', {
     url: link,
-    name: String(name == null ? $('nameinput').value.trim() : name),
+    name: $('nameinput').value.trim(),
     max_clips: Number($('vodmax').value || 12),
     reset: $('vodreset').checked,
   });
   btn.disabled = false; btn.textContent = 'Clip past stream';
-  if (!r) return false;
-  if (r.ok === false) { toast(r.error || 'could not start', true); return false; }
-  vodRunning = true;
+  if (!r) return;
+  if (r.ok === false) return toast(r.error || 'could not start', true);
   // Keep the link in the box: pressing the button again takes the next batch.
   toast('analysing the past stream — watch the activity log');
-  return true;
 }
 
-/* -- local recordings ----------------------------------------------- */
-// Browsers cannot hand us a path, so a dropped file is streamed to the console
-// as raw bytes. It lands in <work>/uploads, then the normal past-stream path
-// analyses and cuts it exactly as if a Twitch VOD had been pasted.
+/* -- raw clips (drop a file, then style it) -------------------------- */
+// Browsers cannot hand us a path, so a dropped clip is streamed to the console
+// as raw bytes. The console normalizes it to MP4 and files it on the clip wall;
+// it is not cut or analysed until the operator ticks it and picks a style.
 function pickLocal() {
   $('fileinput').click();
 }
@@ -798,7 +843,7 @@ function showUpload(note, ratio, bad) {
 
 function hideUploadSoon() {
   setTimeout(() => {
-    if (uploadBusy) return;
+    if (uploadBusy || uploadQueue.length) return;
     $('uploadbar').classList.add('hidden');
     $('uploadnote').classList.add('hidden');
   }, 5000);
@@ -806,33 +851,26 @@ function hideUploadSoon() {
 
 async function pumpLocal() {
   if (uploadBusy) return;
-  // Start anything already uploaded before taking the next file, so a queue of
-  // drops is processed one recording at a time, in order.
-  if (pendingLocal.length && !vodRunning) {
-    const next = pendingLocal.shift();
-    $('vodinput').value = next.path;
-    if (!$('nameinput').value.trim()) $('nameinput').value = next.stem;
-    const started = await startVod(next.path, next.stem);
-    if (started) { hideUploadSoon(); return; }
-  }
   if (!uploadQueue.length) { hideUploadSoon(); return; }
   const file = uploadQueue.shift();
   uploadBusy = true;
-  $('vodbtn').disabled = true;
   showUpload('sending ' + file.name + ' to this Mac...', 0);
   const r = await uploadFile(file);
   uploadBusy = false;
-  $('vodbtn').disabled = false;
   if (!r || r.ok === false) {
     showUpload((r && r.error) || 'upload failed', null, true);
     hideUploadSoon();
     pumpLocal();
     return;
   }
-  const secs = Math.round(r.duration || 0);
-  const length = secs >= 60 ? Math.round(secs / 60) + ' min' : secs + ' s';
-  showUpload('stored ' + r.name + ' · ' + length, 1);
-  pendingLocal.push({path: r.path, stem: r.stem || 'recording'});
+  const secs = r.duration || 0;
+  const length = secs >= 60 ? Math.round(secs / 60) + ' min'
+    : Math.max(1, Math.round(secs)) + ' s';
+  showUpload('added ' + r.file + ' to the wall · ' + length, 1);
+  toast('added ' + (r.title || r.file) + ' — tick it and pick a style');
+  // The wall only repaints when the clip count changes.
+  lastCount = -1;
+  tick();
   pumpLocal();
 }
 
@@ -922,15 +960,11 @@ const VOD_PHASE = {
 function renderVod(v) {
   const bar = $('vodbar'), status = $('vodstatus'), phase = $('vodphase');
   const count = $('vodcount'), note = $('vodnote'), chip = $('vodchip');
-  const wasRunning = vodRunning;
-  vodRunning = !!(v && v.running);
   if (!v || (!v.running && !v.phase)) {
     bar.classList.add('hidden'); status.classList.add('hidden');
     chip.textContent = 'vod'; chip.style.color = '';
-    if (wasRunning) setTimeout(pumpLocal, 250);
     return;
   }
-  if (wasRunning && !vodRunning) setTimeout(pumpLocal, 250);
   bar.classList.remove('hidden'); status.classList.remove('hidden');
   const total = v.total || 0, done = v.rendered || 0;
   $('vodfill').style.width = total ? pct(Math.min(1, done / total))
@@ -1277,7 +1311,7 @@ function renderWall(clips) {
       <video src="/clips/${encodeURIComponent(c.file)}" controls preload="metadata" playsinline></video>
       <div class="meta">
         <span class="title" title="${esc(c.title)}">${esc(c.title || c.file)}</span>
-        <span class="pill">${esc(c.score)}</span>
+        <span class="pill">${c.uploaded ? 'raw' : esc(c.score)}</span>
       </div>
       <label class="pick">
         ${c.styled ? '<span class="chip">' + esc(c.style || 'styled') + '</span>'
@@ -1471,12 +1505,13 @@ class _Handler(BaseHTTPRequestHandler):
         return urlparse(origin).netloc == (self.headers.get("Host") or "")
 
     def _upload(self, query: str):
-        """Stream a dropped recording to ``<work>/uploads`` and probe it.
+        """Stream a dropped raw clip onto the clip wall.
 
         The browser sends the file as the request body (not multipart), so the
         bytes go straight to disk in 1 MiB chunks without buffering a
-        multi-gigabyte recording in memory. The filename arrives in ``?name=``
-        and is reduced to a safe stem and a known video extension.
+        multi-gigabyte recording in memory. The clip is normalized to a
+        browser-playable MP4, moved into ``--out`` with a sidecar, and appears
+        on the wall where it can be ticked and styled.
         """
         engine = self.engine
         params = parse_qs(query or "")
@@ -1513,11 +1548,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return self._json({"ok": False, "error": f"cannot use {folder}: {exc}"},
                               status=500)
-        if length + UPLOAD_RESERVE > free:
+        # The raw upload and the normalized MP4 briefly coexist.
+        if length * 2 + UPLOAD_RESERVE > free:
             self.close_connection = True
             return self._json(
                 {"ok": False,
-                 "error": f"not enough free disk space for this file — "
+                 "error": f"not enough free disk space for this clip — "
                           f"{free / 1024**3:.1f} GB free"},
                 status=507)
 
@@ -1564,14 +1600,96 @@ class _Handler(BaseHTTPRequestHandler):
                  "error": "that file is not a readable video — try MP4, MOV or MKV"},
                 status=400)
 
-        engine.log(f"local file — {target.name} ({duration / 60:.1f} min, "
-                   f"{received / 1024**2:.0f} MB)")
+        out_root = Path(getattr(engine.cfg, "out_dir", "clips")).resolve()
+        temp_dir = out_root / ".incoming"
+        try:
+            out_root.mkdir(parents=True, exist_ok=True)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            target.unlink(missing_ok=True)
+            return self._json(
+                {"ok": False, "error": f"cannot use the clips folder: {exc}"},
+                status=500)
+
+        # Converting and filing are the heavy part. Two tabs dropping at once
+        # must not race for the same free filename, so only one import runs;
+        # the loser keeps its uploaded file and can retry.
+        if not _IMPORT_LOCK.acquire(blocking=False):
+            target.unlink(missing_ok=True)
+            return self._json(
+                {"ok": False, "error": "another clip is still being added — try again in a moment"},
+                status=409)
+        temp: Path | None = None
+        try:
+            final = free_clip_name(out_root, stem)
+            temp = temp_dir / f"{final.stem}.mp4"
+            problem = normalize_clip(target, temp, info)
+            if problem:
+                engine.log(f"upload rejected — {stem}: {problem}")
+                return self._json(
+                    {"ok": False, "error": f"could not convert that clip: {problem}"},
+                    status=400)
+
+            normalized = probe(temp)
+            duration = float(normalized.get("duration") or duration)
+            width = int(normalized.get("width") or info.get("width") or 0)
+            height = int(normalized.get("height") or info.get("height") or 0)
+            if duration <= 0 or not width or not height:
+                return self._json(
+                    {"ok": False, "error": "the converted clip has no picture or length"},
+                    status=400)
+
+            try:
+                os.replace(temp, final)
+            except OSError as exc:
+                return self._json({"ok": False, "error": f"could not save the clip: {exc}"},
+                                  status=500)
+        finally:
+            _IMPORT_LOCK.release()
+            target.unlink(missing_ok=True)
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+        # The sidecar is how the wall and the styler know this is a raw clip
+        # rather than a capture from a live run. ``score`` is zero because no
+        # trigger chose it; it is here because the operator dropped it.
+        title = Path(str(raw_name).replace("\\", "/")).stem.strip() or stem
+        # A portrait capture already has the frame the console is configured
+        # for (split/duo/blur), and that is what the seam-aware styles need.
+        # Landscape footage is left alone and anchored as a horizontal frame.
+        layout = "horizontal"
+        if height >= width:
+            layout = str(getattr(engine.cfg, "layout", "vertical") or "vertical")
+            if layout not in ("split", "duo", "vertical", "blur"):
+                layout = "vertical"
+        sidecar = {
+            "title": title[:80],
+            "score": 0,
+            "source": "upload",
+            "uploaded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "layout_used": layout,
+            "duration": round(duration, 2),
+            "width": width,
+            "height": height,
+            "signals": {},
+            "chat_excerpt": [],
+        }
+        try:
+            final.with_suffix(".json").write_text(
+                json.dumps(sidecar, indent=2), encoding="utf-8")
+        except OSError as exc:
+            engine.log(f"upload — could not write the sidecar for {final.name}: {exc}")
+
+        engine.log(f"raw clip added — {final.name} ({duration:.1f}s, "
+                   f"{width}x{height}, {received / 1024**2:.0f} MB)")
         return self._json({
             "ok": True,
-            "path": str(target),
-            "name": target.name,
-            "stem": stem,
+            "file": final.name,
+            "title": sidecar["title"],
             "duration": duration,
+            "width": width,
+            "height": height,
+            "layout": sidecar["layout_used"],
             "size": received,
         })
 
