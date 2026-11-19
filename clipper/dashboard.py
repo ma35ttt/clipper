@@ -200,6 +200,11 @@ PAGE = """<!doctype html>
               border: 1px solid var(--line2); box-shadow: none; }
   .btn.auto.on { background: linear-gradient(180deg, #46e6b8, var(--cool)); color: #06231b;
                  border: 0; box-shadow: 0 8px 22px rgba(56,224,176,.32); }
+  .btn.kill { background: rgba(255,61,104,.10); color: var(--hot);
+              border: 1px solid rgba(255,61,104,.45); box-shadow: none;
+              font-weight: 800; padding: 8px 13px; }
+  .btn.kill:hover { background: rgba(255,61,104,.2); box-shadow: 0 0 0 3px rgba(255,61,104,.12); }
+  .btn.kill:disabled { opacity: .55; cursor: progress; }
   body.console .top { display: none; }
   body.console #recbtn, body.console #clipbtn { display: none; }
   body.console #streamsec { border-color: rgba(106,168,255,.3); }
@@ -450,6 +455,7 @@ PAGE = """<!doctype html>
   <button class="btn auto" id="autobtn" onclick="toggleAuto()" title="Configure everything: 9:16 frame, webcam follow, synced captions, smart hook (a)">★ AUTO</button>
   <button class="btn rec" id="recbtn" onclick="toggleRec()" title="Start / stop a manual recording (r)">● REC</button>
   <button class="btn" id="clipbtn" onclick="snap()" title="Force a clip at this moment (c)">CLIP NOW</button>
+  <button class="btn kill" id="killbtn" onclick="killSession()" title="Stop every worker, ingest and render, then close this console">Kill session</button>
 </header>
 <main>
   <div class="recbanner hidden" id="recbanner">
@@ -765,6 +771,24 @@ async function updateClipper() {
   btn.textContent = r.updated ? 'Restart to apply' : 'Update';
   if (r.ok === false) return toast(r.message || r.error || 'update failed', true);
   toast(r.message || 'up to date');
+}
+
+async function killSession() {
+  const ok = confirm(
+    'Kill this session?\\n\\nThis stops every stream ingest, worker and render, ' +
+    'and closes the console. Clips already finished stay on disk.');
+  if (!ok) return;
+  const btn = $('killbtn');
+  btn.disabled = true;
+  btn.textContent = 'Killing...';
+  const r = await postJSON('/api/kill', {});
+  if (!r) return;                       // the console went down: expected
+  if (r.ok === false) {
+    btn.disabled = false;
+    btn.textContent = 'Kill session';
+    return toast(r.error || 'could not kill the session', true);
+  }
+  toast('session killed — ' + (r.killed || 0) + ' process(es) stopped');
 }
 
 /* -- past streams (the VOD section) --------------------------------- */
@@ -1481,6 +1505,8 @@ class _Handler(BaseHTTPRequestHandler):
                 ))
             if path == "/api/style/stop":
                 return self._json(engine.stop_style())
+            if path == "/api/kill":
+                return self._json(engine.kill_session())
             if path == "/api/update":
                 action = str(body.get("action") or "check")
                 return self._json(engine.run_update() if action == "apply"

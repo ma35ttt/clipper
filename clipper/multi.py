@@ -11,6 +11,7 @@ serves a single console at http://127.0.0.1:<port> that tiles every worker.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import procs
 from .chat import normalize_channel
 from .util import fmt_clock, safe_name
 
@@ -260,6 +262,8 @@ class Multi:
         channel.proc = subprocess.Popen(
             cmd, cwd=str(ROOT), stdout=handle, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+               if os.name == "nt" else {"start_new_session": True}),
         )
         handle.close()
         self.log(f"started {channel.name:<14} console :{channel.port}  → {channel.out_dir}")
@@ -268,11 +272,14 @@ class Multi:
         proc = channel.proc
         if proc is None or proc.poll() is not None:
             return
+        children = procs.descendants(proc.pid)
         proc.terminate()
+        procs.terminate(children, timeout=8.0)
         try:
-            proc.wait(timeout=8)
+            proc.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
 
     # -- supervision ---------------------------------------------------
     def _supervise(self) -> None:

@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -23,6 +25,7 @@ from clipper import camera  # noqa: E402
 from clipper import edit  # noqa: E402
 from clipper import emoji as emoji_mod  # noqa: E402
 from clipper import pack  # noqa: E402
+from clipper import procs  # noqa: E402
 from clipper import profile  # noqa: E402
 from clipper import streams  # noqa: E402
 from clipper import transcribe  # noqa: E402
@@ -2210,6 +2213,60 @@ class StyleTest(unittest.TestCase):
         self.assertEqual(args.style, "hype")
         listed = build_parser().parse_args(["styles"])
         self.assertEqual(listed.func.__name__, "cmd_styles")
+
+
+class ProcessTreeTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "posix process tables")
+    def test_kill_tree_takes_the_children_with_it(self):
+        # parent -> grandchild, exactly the worker -> ffmpeg shape.
+        parent = subprocess.Popen(
+            [sys.executable, "-c",
+             "import subprocess,sys,time;"
+             "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+             "print(p.pid,flush=True);"
+             "time.sleep(30)"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        grandchild = 0
+        try:
+            line = parent.stdout.readline().strip()
+            self.assertTrue(line.isdigit(), line)
+            grandchild = int(line)
+            self.assertIn(grandchild, procs.descendants(parent.pid))
+            procs.kill_tree(parent.pid, timeout=2.0)
+            parent.wait(timeout=5)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and _ps_running(grandchild):
+                time.sleep(0.05)
+            self.assertFalse(_ps_running(grandchild), "grandchild outlived the tree")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=5)
+            if parent.stdout:
+                parent.stdout.close()
+            if grandchild:
+                try:
+                    os.kill(grandchild, 9)
+                except OSError:
+                    pass
+
+    def test_terminate_never_includes_this_process(self):
+        before = procs.alive(os.getpid())
+        procs.terminate([os.getpid(), -1, 0], timeout=0.1)
+        self.assertTrue(before)
+        self.assertTrue(procs.alive(os.getpid()))
+
+
+def _ps_running(pid: int) -> bool:
+    """A pid is running only when ps lists it and it is not a zombie."""
+    try:
+        out = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    state = out.strip()
+    return bool(state) and not state.startswith("Z")
 
 
 class CliTest(unittest.TestCase):

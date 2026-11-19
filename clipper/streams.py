@@ -14,6 +14,7 @@ retried from the console.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,6 +25,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import procs
 from . import profile
 from .chat import normalize_channel
 from .multi import free_port
@@ -293,9 +295,14 @@ class StreamManager:
     def _real_spawn(self, cmd: list[str], log_path: Path):
         handle = open(log_path, "ab")
         try:
+            # A worker leads its own process group so a terminal Ctrl-C on the
+            # console never reaches it, and its ffmpeg children stay grouped
+            # with it for a process-tree kill.
+            extra = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                     if os.name == "nt" else {"start_new_session": True})
             return subprocess.Popen(
                 cmd, cwd=str(ROOT), stdout=handle, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, **extra,
             )
         finally:
             handle.close()
@@ -304,11 +311,18 @@ class StreamManager:
         proc = stream.proc
         if proc is None or proc.poll() is not None:
             return
+        # The worker owns an ffmpeg ingest and may own a render; SIGTERM alone
+        # would leave them running after the Python process is gone. Collect
+        # the children before the worker exits, because they are reparented to
+        # init the moment it does.
+        children = procs.descendants(proc.pid)
         proc.terminate()
+        procs.terminate(children, timeout=6.0)
         try:
-            proc.wait(timeout=6)
+            proc.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=5)
 
     # -- telemetry -----------------------------------------------------
     def _poll(self) -> None:

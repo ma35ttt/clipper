@@ -211,6 +211,11 @@ your machine only; nothing is exposed to the network.
   filed on the wall, and can be ticked and styled like any capture. Nothing
   leaves your machine.
 - **Update** — pull the newest version from GitHub without leaving the page.
+- **Kill session** — stop the whole machine-side session in one click: every
+  worker, stream ingest, audio probe and in-flight render is signalled and then
+  killed, and the console exits. Finished clips stay on disk; a clip that was
+  mid-render is abandoned. This is the only shutdown that guarantees no ffmpeg
+  is left running in the background.
 - **Clip wall** — play, download, copy the path, or delete each clip.
 
 Everything on the page is also a command-line flag, and per-streamer settings are

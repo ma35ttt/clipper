@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from . import __version__
 from . import edit as edit_mod
+from . import procs
 from . import profile
 from . import styles as styles_mod
 from . import voice as voice_mod
@@ -144,6 +147,7 @@ class Engine:
         self._stop = threading.Event()
         self._force = threading.Event()
         self._closed = False
+        self._killing = False
         self._above_since: float | None = None
         self._cooldown_until = 0.0
         self._chat_q: queue.Queue = queue.Queue()
@@ -215,10 +219,62 @@ class Engine:
     def stop(self) -> None:
         self._stop.set()
 
+    def _install_stop_signals(self) -> None:
+        """Route SIGTERM through the normal shutdown instead of dying on it.
+
+        ``kill <pid>`` on a clipper session used to take Python down at once
+        and leave every worker ffmpeg running. Setting the stop flag lets the
+        run loop reach :meth:`_shutdown`, which kills whole process trees.
+        """
+        if os.name == "nt":
+            return
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            try:
+                signal.signal(sig, lambda *_: self._stop.set())
+            except (ValueError, OSError):
+                # Not the main thread (tests import the engine); that caller
+                # still owns shutdown.
+                return
+
+    def kill_session(self) -> dict:
+        """Stop every process this session owns, then close the console.
+
+        This is the red button: workers, their ffmpeg ingests, the audio
+        probe, VOD/style renders and this process all go down now. An
+        in-flight render is abandoned, not finished.
+        """
+        if self._killing:
+            return {"ok": True, "note": "already stopping"}
+        self._killing = True
+        self._stop.set()
+        pids = procs.descendants(os.getpid())
+        # Short grace: this is a kill switch, not a graceful stop. A worker
+        # parked in a retry sleep ignores SIGTERM for up to a minute.
+        procs.terminate(pids, timeout=1.2)
+        stragglers = [pid for pid in procs.descendants(os.getpid())
+                      if procs.alive(pid)]
+        if stragglers:
+            procs.terminate(stragglers, timeout=1.0)
+        self.log(f"kill session — stopped {len(pids)} process(es), exiting")
+        threading.Thread(target=self._finish_kill, name="kill", daemon=True).start()
+        return {"ok": True, "killed": len(pids)}
+
+    def _finish_kill(self) -> None:
+        # Give the HTTP response a moment to leave the socket, then take the
+        # console down even if a render thread is still blocked.
+        time.sleep(0.4)
+        try:
+            if self.dashboard:
+                self.dashboard.stop()
+        except Exception:  # noqa: BLE001 - exiting anyway
+            pass
+        os._exit(0)
+
     def force_clip(self) -> None:
         self._force.set()
 
     def run(self) -> int:
+        self._install_stop_signals()
         if getattr(self.cfg, "console", False):
             return self._run_console()
         self._prepare_dirs()
@@ -1508,6 +1564,16 @@ class Engine:
             return
         self._closed = True
         self._stop.set()
+        if self._killing:
+            # kill_session already took every process down; don't wait on a
+            # render it deliberately abandoned. Stay alive briefly so the
+            # dashboard request that asked for the kill can write its reply;
+            # the kill thread calls os._exit shortly.
+            if self._log_fh:
+                self._log_fh.close()
+                self._log_fh = None
+            time.sleep(3.0)
+            return
         if self.chat:
             self.chat.stop()
         self.analyzer.stop()
@@ -1519,11 +1585,12 @@ class Engine:
             self.dashboard.stop()
         self.streams.stop_all()
         if self._ingest and self._ingest.poll() is None:
-            self._ingest.terminate()
+            procs.kill_tree(self._ingest.pid, timeout=5.0)
             try:
-                self._ingest.wait(timeout=5)
+                self._ingest.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 self._ingest.kill()
+                self._ingest.wait(timeout=5)
         self.log("finishing renders…")
         if self._rec_cap is not None:
             self.log("cutting the open recording")
