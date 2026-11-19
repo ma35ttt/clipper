@@ -1,7 +1,7 @@
 # clipper
 
 <p align="center">
-  <a href="docs/clipper-explainer.mp4"><img src="docs/explainer-preview.gif" alt="Walkthrough: capture live, clip past streams, pick a style, update on Windows" width="880"></a>
+  <a href="docs/clipper-explainer.mp4"><img src="docs/explainer-preview.gif" alt="Walkthrough: capture live, clip past streams, pick a style, update on Windows" width="800"></a>
 </p>
 
 <p align="center">
