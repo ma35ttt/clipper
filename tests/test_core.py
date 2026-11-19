@@ -286,7 +286,7 @@ class EmojiTest(unittest.TestCase):
     def test_hook_borrows_the_chat_reaction(self):
         chat = [{"user": "a", "text": "LOOK AT THE MAP 🔥"},
                 {"user": "b", "text": "look at the map 🔥"}]
-        self.assertEqual(pick_title(Config(), {}, [], chat),
+        self.assertEqual(pick_title(Config(title_mode="auto"), {}, [], chat),
                          "CHAT SAYS LOOK AT THE MAP 🔥")
 
     def test_a_fixed_hook_keeps_the_author_s_emoji(self):
@@ -625,7 +625,7 @@ class SplitLayoutTest(unittest.TestCase):
             {"user": "d", "text": "lol"},
         ]
         self.assertEqual(hook_from_chat(chat), "LOOK AT THE MAP")
-        self.assertEqual(pick_title(Config(), {}, [], chat),
+        self.assertEqual(pick_title(Config(title_mode="auto"), {}, [], chat),
                          "CHAT SAYS LOOK AT THE MAP")
 
     def test_one_loud_user_cannot_invent_a_chat_hook(self):
@@ -636,13 +636,13 @@ class SplitLayoutTest(unittest.TestCase):
 
     def test_a_short_question_is_a_hook(self):
         cues = [transcribe.Cue(0, 1.5, "Where is my Tia?")]
-        self.assertEqual(pick_title(Config(), {}, cues, []), "WHERE IS MY TIA?")
+        self.assertEqual(pick_title(Config(title_mode="auto"), {}, cues, []), "WHERE IS MY TIA?")
 
     def test_a_question_beats_a_generic_reaction(self):
         cues = [transcribe.Cue(0, 4.0,
                                "play. Holy fucking map! Is this the fucking "
                                "bridge I jumped off Teef")]
-        self.assertEqual(pick_title(Config(), {}, cues, []),
+        self.assertEqual(pick_title(Config(title_mode="auto"), {}, cues, []),
                          "IS THIS THE FUCKING BRIDGE I JUMPED OFF?")
 
     def test_an_interrogative_without_a_question_mark_still_counts(self):
@@ -654,7 +654,7 @@ class SplitLayoutTest(unittest.TestCase):
                 for name in ("a", "b", "c", "d")]
         cues = [transcribe.Cue(0, 2.0, "The way back back I")]
         self.assertEqual(hook_keyword(chat), "BACK")
-        self.assertEqual(pick_title(Config(), {}, cues, chat), "CHAT SAYS BACK")
+        self.assertEqual(pick_title(Config(title_mode="auto"), {}, cues, chat), "CHAT SAYS BACK")
 
     def test_one_person_spamming_a_word_is_not_consensus(self):
         chat = [{"user": "a", "text": "BACK"}] * 6
@@ -954,8 +954,12 @@ class ConfigTest(unittest.TestCase):
             Config(input="x", verify="bogus").validate()
         Config(input="x", verify="auto").validate()
 
-    def test_default_verify_is_auto(self):
-        self.assertEqual(Config().verify, "auto")
+    def test_defaults_are_capture_only(self):
+        cfg = Config()
+        self.assertEqual(cfg.verify, "off")
+        self.assertEqual(cfg.subs, "off")
+        self.assertEqual(cfg.title_mode, "none")
+        self.assertEqual(cfg.layout, "split")
 
     def test_cam_auto_and_caption_styles_are_valid(self):
         Config(input="x", cam="auto", subs_style="pop").validate()
@@ -1041,7 +1045,7 @@ class AutoConfigureTest(unittest.TestCase):
         values, note = profile.autoconfigure("xQc", "twitch:xqc")
         self.assertIn("xQc", values["subs_prompt"])
         self.assertIn("Juicer", values["subs_prompt"])
-        self.assertEqual(values["subs"], "on")
+        self.assertEqual(values["subs"], "off")
         self.assertIsNone(values["subs_model"])
         self.assertEqual(values["encoder"], "auto")
         self.assertIn("xQc", note)
@@ -1133,7 +1137,7 @@ class ConsoleTest(unittest.TestCase):
         self.assertTrue(self.engine._auto)
         self.assertEqual(self.cfg.layout, "split")
         self.assertEqual(self.cfg.cam, "auto")
-        self.assertEqual(self.cfg.subs, "on")
+        self.assertEqual(self.cfg.subs, "off")
         off = self.engine.apply_auto(False)
         self.assertFalse(off["auto"])
         self.assertEqual(self.cfg.cam, "1:2:3:4")
@@ -1421,7 +1425,8 @@ class DashboardTest(unittest.TestCase):
         for endpoint in ("/api/state", "/api/settings", "/api/auto",
                          "/api/autoconfigure", "/api/profile", "/api/camera",
                          "/api/clips/delete", "/api/clip", "/api/streams",
-                         "/api/streams/stop", "/api/streams/retry", "?download=1"):
+                         "/api/streams/stop", "/api/streams/retry",
+                         "/api/vod", "/api/style", "?download=1"):
             self.assertIn(endpoint, PAGE, endpoint)
 
     def test_page_has_auto_configure_button(self):
@@ -1495,6 +1500,31 @@ class VodTest(unittest.TestCase):
         moments = vod_mod.pick_moments(curve, cfg, max_clips=2)
         self.assertEqual(len(moments), 2)
         self.assertAlmostEqual(min(m.score for m in moments), 0.7, delta=0.01)
+
+    def test_rerun_skips_windows_already_clipped(self):
+        cfg = Config(input="x")
+        cfg.pre, cfg.post = 5.0, 5.0
+        moments = [vod_mod.Moment(t=10.0, score=0.9),
+                   vod_mod.Moment(t=40.0, score=0.8),
+                   vod_mod.Moment(t=80.0, score=0.7)]
+        used = [{"t": 10.0, "start": 5.0, "end": 15.0, "file": "a.mp4"}]
+        fresh = vod_mod.fresh_moments(moments, used, cfg, max_clips=12)
+        self.assertEqual([m.t for m in fresh], [40.0, 80.0])
+
+    def test_fresh_moments_keeps_only_the_strongest_batch(self):
+        cfg = Config(input="x")
+        cfg.pre, cfg.post = 2.0, 2.0
+        moments = [vod_mod.Moment(t=float(t), score=float(t) / 100.0)
+                   for t in (5, 20, 35, 50)]
+        fresh = vod_mod.fresh_moments(moments, [], cfg, max_clips=2)
+        self.assertEqual([m.t for m in fresh], [35.0, 50.0])
+
+    def test_vod_history_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Config(input="x", work_dir=Path(tmp))
+            self.assertEqual(vod_mod.load_history(cfg), {})
+            vod_mod.save_history(cfg, {"twitch:1": {"used": [{"t": 5}]}})
+            self.assertEqual(vod_mod.load_history(cfg)["twitch:1"]["used"][0]["t"], 5)
 
     def test_build_curve_reacts_to_a_chat_and_audio_burst(self):
         cfg = Config(input="x")
@@ -1614,6 +1644,114 @@ class UpdateTest(unittest.TestCase):
         self.assertIn("not cloned", result["message"])
 
 
+class StyleTest(unittest.TestCase):
+    """Post-session looks: styles, caption files and punch-in planning."""
+
+    def test_catalogue_has_the_builtin_styles(self):
+        from clipper import styles
+
+        with tempfile.TemporaryDirectory() as tmp:
+            names = {row["name"] for row in styles.catalogue(Path(tmp))}
+        self.assertTrue({"clean", "hype", "cinematic", "podcast", "raw"} <= names)
+
+    def test_unknown_style_falls_back_to_clean(self):
+        from clipper import styles
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(styles.resolve("does-not-exist", Path(tmp)).name, "clean")
+
+    def test_ass_file_keeps_subtitles_white(self):
+        cues = transcribe.Cues(
+            [transcribe.Cue(0.2, 1.4, "THIS IS THE MOMENT")],
+            [transcribe.Cue(0.2, 0.6, "THIS"),
+             transcribe.Cue(0.6, 1.0, "IS"),
+             transcribe.Cue(1.0, 1.4, "MOMENT")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "subs.ass"
+            self.assertTrue(caption.build_ass(cues, path, y=1700))
+            text = path.read_text()
+        self.assertIn("PlayResY: 1920", text)
+        self.assertIn("Dialogue:", text)
+        self.assertIn("THIS IS MOMENT", text)
+        self.assertIn("&H00FFFFFF&", text)          # white primary
+        self.assertNotIn("&H003FD2FF&", text.split("[Events]")[1])  # no gold subs
+
+    def test_punch_plan_stays_short_and_close(self):
+        from clipper import restyle, styles
+
+        cues = transcribe.Cues(
+            [transcribe.Cue(0, 4, "MASSIVE explosion happened somehow")],
+            [transcribe.Cue(0.4, 0.9, "MASSIVE"),
+             transcribe.Cue(1.2, 1.6, "explosion"),
+             transcribe.Cue(2.0, 2.4, "happened"),
+             transcribe.Cue(2.8, 3.2, "somehow")],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            style = styles.resolve("hype", Path(tmp))
+        punches = restyle.plan_punches(cues, 4.0, style)
+        self.assertTrue(punches)
+        self.assertLessEqual(len(punches), 3)
+        for punch in punches:
+            self.assertGreater(punch["end"], punch["start"])
+            self.assertLessEqual(punch["zoom"], 1.25)
+            self.assertGreaterEqual(punch["start"], 0.0)
+
+    def test_restyle_raw_writes_one_styled_copy(self):
+        from clipper import restyle
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            clip = tmp_path / "capture.mp4"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc2=size=320x240:rate=15:duration=2",
+                 "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", str(clip)],
+                check=True)
+            clip.with_suffix(".json").write_text(json.dumps(
+                {"title": "", "score": 0.5, "layout_used": "split"}))
+            cfg = Config(input="x", out_dir=tmp_path,
+                         work_dir=tmp_path / "work")
+            code = restyle.run(cfg, [clip], "raw")
+            self.assertEqual(code, 0)
+            self.assertTrue((tmp_path / "capture_raw.mp4").exists())
+
+    def test_capture_only_never_runs_whisper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "window.mp4"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                 "-i", "testsrc2=size=320x240:rate=15:duration=2",
+                 "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
+                 "-c:v", "libx264", "-preset", "ultrafast",
+                 "-pix_fmt", "yuv420p", "-c:a", "aac", str(source)],
+                check=True)
+            cfg = Config(input="x", out_dir=tmp_path / "out",
+                         work_dir=tmp_path / "work", layout="blur")
+            engine = Engine(cfg)
+            prepared = engine.cutter.prepare_window(source, 0, 2, "capture")
+            meta = {"stamp": "20261119-130000", "score": 0.6,
+                    "signals": {"t": 1.0}, "stream_start": 0.0,
+                    "stream_end": 2.0, "chat_excerpt": []}
+            with mock.patch.object(Cutter, "transcribe",
+                                   side_effect=AssertionError("whisper ran")):
+                engine._render(prepared, meta, False, [])
+            self.assertTrue(meta.get("capture_only"))
+            self.assertTrue((tmp_path / "out" / meta["file"]).exists())
+
+    def test_style_subcommands_are_wired(self):
+        from clipper.cli import build_parser
+
+        args = build_parser().parse_args(["style", "a.mp4", "--style", "hype"])
+        self.assertEqual(args.func.__name__, "cmd_style")
+        self.assertEqual(args.style, "hype")
+        listed = build_parser().parse_args(["styles"])
+        self.assertEqual(listed.func.__name__, "cmd_styles")
+
+
 class CliTest(unittest.TestCase):
     def test_vod_and_update_subcommands_are_wired(self):
         from clipper.cli import build_parser
@@ -1621,7 +1759,7 @@ class CliTest(unittest.TestCase):
         vod_args = build_parser().parse_args(["vod", "https://twitch.tv/videos/1"])
         self.assertEqual(vod_args.func.__name__, "cmd_vod")
         self.assertEqual(vod_args.link, "https://twitch.tv/videos/1")
-        self.assertEqual(vod_args.max_clips, 15)
+        self.assertEqual(vod_args.max_clips, 12)
 
         upd = build_parser().parse_args(["update", "--check"])
         self.assertEqual(upd.func.__name__, "cmd_update")

@@ -21,3 +21,6 @@ demo/*.jsonl
 demo/*.jpg
 demo/*.png
 demo/*.wav
+
+# local docs tooling
+.venv-doc/

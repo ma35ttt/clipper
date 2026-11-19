@@ -39,6 +39,7 @@ from .signals import (AGREE_BAR, AGREE_CAP, AUDIO_DELTA_SPAN, AUDIO_Z_FLOOR,
                       CHAT_Z_SPAN, MIN_BASE, _keyword_hits, _median, _z_to_score)
 from .util import FFMPEG, probe, run, safe_name
 
+DEFAULT_CLIPS = 12             # one VOD run is a posting batch, not a dump
 STEP = 1.0                     # seconds per analysis bucket
 AUDIO_WINDOW = 3.0             # seconds of audio averaged into "now"
 CHAT_CHUNK = 600.0             # seconds of VOD chat fetched by one worker
@@ -631,10 +632,80 @@ def pick_moments(curve: list[float], cfg: Config, step: float = STEP,
 
 
 # --------------------------------------------------------------------------- #
+# what has already been clipped from this source
+# --------------------------------------------------------------------------- #
+
+def _history_path(cfg: Config) -> Path:
+    return Path(cfg.work_dir) / "vod_history.json"
+
+
+def source_key(source: VodSource) -> str:
+    """A stable identity so a rerun knows which moments are already gone."""
+    if source.kind == "twitch" and source.video_id:
+        return f"twitch:{source.video_id}"
+    if source.kind == "youtube":
+        return f"youtube:{source.url}"
+    return f"{source.kind}:{Path(str(source.url)).resolve()}:{source.duration:.0f}"
+
+
+def load_history(cfg: Config) -> dict:
+    try:
+        data = json.loads(_history_path(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_history(cfg: Config, history: dict) -> None:
+    path = _history_path(cfg)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(history, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def fresh_moments(moments: list[Moment], used: list[dict], cfg: Config,
+                  max_clips: int = DEFAULT_CLIPS) -> list[Moment]:
+    """Drop moments whose clip window overlaps one already rendered."""
+    def bounds(moment: Moment) -> tuple[float, float]:
+        start = max(0.0, moment.t - cfg.pre)
+        end = moment.t + cfg.post
+        if moment.end:
+            end = max(end, moment.end)
+        return start, end
+
+    kept: list[Moment] = []
+    for moment in moments:
+        start, end = bounds(moment)
+        clash = False
+        for row in used:
+            try:
+                old_start = float(row.get("start", float(row.get("t", 0)) - cfg.pre))
+                old_end = float(row.get("end", float(row.get("t", 0)) + cfg.post))
+            except (TypeError, ValueError):
+                continue
+            # Overlap by more than a second means it is effectively the same
+            # moment; touching edges are fine.
+            if min(end, old_end) - max(start, old_start) > 1.0:
+                clash = True
+                break
+        if not clash:
+            kept.append(moment)
+    if max_clips and len(kept) > max_clips:
+        strongest = sorted(kept, key=lambda m: m.score, reverse=True)[:max_clips]
+        kept = sorted(strongest, key=lambda m: m.t)
+    return kept
+
+
+# --------------------------------------------------------------------------- #
 # the run
 # --------------------------------------------------------------------------- #
 
-def run(cfg: Config, link: str, *, max_clips: int = 15, chat_mode: str = "auto",
+def run(cfg: Config, link: str, *, max_clips: int = DEFAULT_CLIPS,
+        chat_mode: str = "auto", reset: bool = False,
         log=None, should_stop=None, state: dict | None = None) -> int:
     """Analyse a past stream and render its best moments. Returns an exit code.
 
@@ -667,6 +738,28 @@ def run(cfg: Config, link: str, *, max_clips: int = 15, chat_mode: str = "auto",
         return 1
 
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
+    key = source_key(source)
+    history = load_history(cfg)
+    entry = history.get(key) if isinstance(history.get(key), dict) else {}
+    if reset and entry.get("used"):
+        log("vod: starting this source over — the old clip ledger is cleared")
+        entry["used"] = []
+        entry["runs"] = 0
+    used = list(entry.get("used") or [])
+    entry.update({
+        "title": source.title or entry.get("title", ""),
+        "channel": source.channel or entry.get("channel", ""),
+        "kind": source.kind,
+        "duration_s": round(source.duration, 2),
+        "last_run": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "runs": int(entry.get("runs") or 0) + 1,
+        "used": used,
+    })
+    history[key] = entry
+    save_history(cfg, history)
+    if used:
+        log(f"vod: {len(used)} clip(s) already taken from this source — "
+            "this run looks for new moments")
     engine.channel = safe_name(cfg.name or source.channel or "vod", 24)
     engine._maybe_load_profile()
     engine._load_cam()
@@ -699,10 +792,15 @@ def run(cfg: Config, link: str, *, max_clips: int = 15, chat_mode: str = "auto",
         log("vod: could not measure the audio — is the source playable?")
         return 1
     curve = build_curve(levels, chat, cfg)
-    moments = pick_moments(curve, cfg, max_clips=max_clips)
-    progress(found=len(moments), total=len(moments))
-    log(f"vod: analysing {len(levels)}s → {len(moments)} moment(s) "
-        f"at threshold {cfg.threshold:.2f}")
+    # Rank a wider pool, remove anything an earlier run already posted, then
+    # keep this batch to the requested number. A rerun therefore gets the next
+    # best moments instead of the same clips again.
+    pool = pick_moments(curve, cfg,
+                        max_clips=(max_clips * 5) if max_clips else 0)
+    moments = fresh_moments(pool, used, cfg, max_clips)
+    progress(found=len(pool), fresh=len(moments), total=len(moments))
+    log(f"vod: analysing {len(levels)}s → {len(pool)} moment(s) "
+        f"at threshold {cfg.threshold:.2f}; {len(moments)} new this run")
 
     # --- camera -------------------------------------------------------
     if (not stop() and cfg.layout == "split" and getattr(engine, "_cam_setting", "auto")
@@ -717,7 +815,13 @@ def run(cfg: Config, link: str, *, max_clips: int = 15, chat_mode: str = "auto",
     # --- render -------------------------------------------------------
     if not moments:
         progress(phase="done", clips=0)
-        log("vod: no clip-worthy moments — try a lower --threshold")
+        if used:
+            progress(note="every strong moment from this source has already "
+                         "been clipped — use --reset to take them again")
+            log("vod: no new clips left for this source — "
+                "run with --reset to start it over")
+        else:
+            log("vod: no clip-worthy moments — try a lower --threshold")
         return 0
 
     subtitles = engine.cutter.subtitle_enabled()
@@ -737,23 +841,38 @@ def run(cfg: Config, link: str, *, max_clips: int = 15, chat_mode: str = "auto",
         progress(index=index, clips=rendered)
         log(f"vod: clip {index}/{len(moments)} — cutting "
             f"{_clock(start)}–{_clock(end)} (score {moment.score:.2f})")
-        if _render_moment(engine, source, start, end, moment, chat, subtitles):
+        file = _render_moment(engine, source, start, end, moment, chat, subtitles)
+        if file:
             rendered += 1
+            used.append({"t": round(moment.t, 2),
+                         "start": round(start, 2), "end": round(end, 2),
+                         "score": round(moment.score, 3),
+                         "file": file,
+                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            entry["used"] = used
+            entry["last_clip_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            history[key] = entry
+            save_history(cfg, history)
     progress(phase="done", clips=rendered, index=min(rendered, len(moments)),
              total=len(moments))
     log(f"vod: finished — {rendered} clip(s) → {cfg.out_dir}")
+    if len(used) >= len(pool) and rendered:
+        log("vod: that was the last batch for this source — "
+            "use --reset to start it over")
+    else:
+        log("vod: run it again for the next batch of new moments")
     return 0
 
 
 def _render_moment(engine, source: VodSource, start: float, end: float,
-                   moment: Moment, chat, subtitles: bool) -> bool:
+                   moment: Moment, chat, subtitles: bool) -> str:
     """Cut one moment out of the VOD and run it through the normal renderer."""
     job_id = f"vod_{int(time.time() * 1000)}"
     prepared = engine.cutter.prepare_window(source.url, start, end, job_id,
                                             log=engine.log)
     if prepared is None:
         engine.log("vod: the moment could not be cut — skipping")
-        return False
+        return ""
     window = [{"t": round(t, 1), "user": user, "text": text}
               for t, user, text in chat if start <= t <= end]
     meta = {
@@ -776,7 +895,7 @@ def _render_moment(engine, source: VodSource, start: float, end: float,
     }
     meta["chat_excerpt"] = window[-14:]
     engine._render(prepared, meta, subtitles, window)
-    return bool(meta.get("file"))
+    return str(meta.get("file") or "")
 
 
 def _clock(seconds: float) -> str:

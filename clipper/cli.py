@@ -51,9 +51,11 @@ def _add_run_args(p: argparse.ArgumentParser, include_source: bool = True) -> No
                         "(default: 2 when chat and audio are both live, else 1; "
                         "set 1 to let a single signal fire)")
     p.add_argument("--chat-lag", type=float, help="viewer delay vs ingest, in seconds (default: 3)")
-    p.add_argument("--title-mode", choices=TITLE_MODES, help="hook caption on the clip")
+    p.add_argument("--title-mode", choices=TITLE_MODES,
+                   help="hook caption on the live clip (default: none — style it later)")
     p.add_argument("--title", help="fixed caption text when --title-mode fixed")
-    p.add_argument("--subs", choices=SUBS_MODES, help="burn in speech subtitles (default: auto)")
+    p.add_argument("--subs", choices=SUBS_MODES,
+                   help="burn in speech subtitles while capturing (default: off)")
     p.add_argument("--subs-style", choices=SUBS_STYLES,
                    help="subtitle look: 'pop' word-chunks on a pill (default), "
                         "or 'block' text lines")
@@ -66,7 +68,7 @@ def _add_run_args(p: argparse.ArgumentParser, include_source: bool = True) -> No
                         "0 auto, negative = all cores)")
     p.add_argument("--verify", choices=VERIFY_MODES,
                    help="verify flagged candidates with a fast transcript "
-                        "(default: auto — on when a whisper model is present)")
+                        "(default: off — capture stays cheap)")
     p.add_argument("--verify-interval", type=float,
                    help="minimum seconds between verifications (default: 15)")
     p.add_argument("--edit", choices=EDIT_MODES,
@@ -189,7 +191,64 @@ def cmd_vod(args: argparse.Namespace) -> int:
         return 0
     print(BANNER)
     return vod_mod.run(cfg, args.link, max_clips=args.max_clips,
-                       chat_mode=args.chat_mode)
+                       chat_mode=args.chat_mode, reset=args.reset)
+
+
+def cmd_style(args: argparse.Namespace) -> int:
+    """Apply an editing style to clips that are already on disk."""
+    from . import restyle
+
+    args.input = ""
+    args.console = True                 # no ingest: this is a file-to-file job
+    cfg = _config_from_args(args)
+    cfg.dashboard = False
+    files = list(args.clips or [])
+    if args.last:
+        # Clips live in one folder per streamer, so look one level down too.
+        candidates = sorted(Path(cfg.out_dir).rglob("*.mp4"),
+                            key=lambda p: p.stat().st_mtime, reverse=True)
+        picked = []
+        for path in candidates:
+            side = path.with_suffix(".json")
+            try:
+                if side.exists() and json.loads(side.read_text()).get("styled_from"):
+                    continue
+            except (OSError, ValueError):
+                pass
+            picked.append(path)
+            if len(picked) >= args.last:
+                break
+        files += [str(path) for path in picked]
+    if not files:
+        print("error: name at least one clip, or use --last N")
+        return 2
+    print(BANNER)
+    return restyle.run(cfg, files, args.style)
+
+
+def cmd_styles(args: argparse.Namespace) -> int:
+    """List the built-in styles, or learn pacing from reference reels."""
+    from . import styles as styles_mod
+
+    args.input = ""
+    args.console = True
+    cfg = _config_from_args(args)
+    if args.scan:
+        rows = styles_mod.scan(args.scan, cfg.work_dir, log=print)
+        if not rows:
+            print("no video files found in that list")
+            return 1
+        print(f"\n{'reference':32} {'category':12} {'cuts/min':>8}  style")
+        for row in rows:
+            print(f"{row['file'][:32]:32} {row['category']:12} "
+                  f"{row['cuts_per_min']:8.1f}  {row['style']}")
+        print(f"\nstyles saved in {styles_mod.style_dir(cfg.work_dir)}")
+        return 0
+    rows = styles_mod.catalogue(cfg.work_dir)
+    for row in rows:
+        mark = "" if row["builtin"] else "  (learned)"
+        print(f"{row['name']:16} {row['category']:11} {row['note']}{mark}")
+    return 0
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
@@ -243,6 +302,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     style = (f"ImageMagick · {Path(caption_mod.styled_font()).name}" if styled
              else "bitmap fallback (brew install imagemagick for outlined text)")
     rows.append(("caption style", style, styled))
+    ass = caption_mod.ass_available()
+    rows.append(("ass captions",
+                 "libass available (ffmpeg-full)" if ass
+                 else "PNG fallback — brew install ffmpeg-full for .ass",
+                 ass))
 
     from . import emoji as emoji_mod
 
@@ -581,12 +645,32 @@ def build_parser() -> argparse.ArgumentParser:
                             "or a .m3u8 URL")
     p_vod.add_argument("-c", "--chat",
                        help="file:<chat.jsonl> to score with instead of the VOD's chat")
-    p_vod.add_argument("--max-clips", type=int, default=15,
-                       help="make at most this many clips (default: 15)")
+    p_vod.add_argument("--max-clips", type=int, default=12,
+                       help="make at most this many clips per run (default: 12)")
     p_vod.add_argument("--chat-mode", choices=("auto", "on", "off"), default="auto",
                        help="read the VOD's own chat for scoring (default: auto)")
+    p_vod.add_argument("--reset", action="store_true",
+                       help="start this source over (ignore clips taken in earlier runs)")
     p_vod.add_argument("--name", help="display/profile name (defaults to the channel)")
     p_vod.set_defaults(func=cmd_vod)
+
+    p_style = sub.add_parser(
+        "style", help="add captions, a hook and punch-ins to clips you choose")
+    _add_run_args(p_style, include_source=False)
+    p_style.add_argument("clips", nargs="*",
+                         help="clip files (or names inside --out) to style")
+    p_style.add_argument("--style", default="clean",
+                         help="built-in or scanned style name (default: clean)")
+    p_style.add_argument("--last", type=int, default=0,
+                         help="style the newest N capture clips instead of naming files")
+    p_style.set_defaults(func=cmd_style, console=True)
+
+    p_styles = sub.add_parser(
+        "styles", help="list styles, or categorise reference reels by their editing")
+    _add_run_args(p_styles, include_source=False)
+    p_styles.add_argument("--scan", nargs="+", metavar="VIDEO",
+                          help="analyse reference clips and save a style for each")
+    p_styles.set_defaults(func=cmd_styles, console=True)
 
     p_frame = sub.add_parser("frame", help="grab a frame so you can line up --cam")
     p_frame.add_argument("-i", "--input", required=True, help="stream URL or file")

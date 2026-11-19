@@ -10,8 +10,31 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
-FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+def _tool(name: str, env: str, extra: tuple[str, ...] = ()) -> str:
+    """Resolve a media tool, preferring a capable local build.
+
+    Homebrew's regular ``ffmpeg`` bottle ships without libass/freetype, so it
+    cannot burn ``.ass`` captions. ``ffmpeg-full`` is keg-only and lives beside
+    it; when it is installed we use it by default. ``FFMPEG``/``FFPROBE`` in the
+    environment always win, and a missing optional build falls back to PATH.
+    """
+    override = os.environ.get(env)
+    if override:
+        return override
+    for candidate in extra:
+        if Path(candidate).exists():
+            return candidate
+    return shutil.which(name) or name
+
+
+FFMPEG = _tool("ffmpeg", "FFMPEG", (
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg",
+    "/usr/local/opt/ffmpeg-full/bin/ffmpeg",
+))
+FFPROBE = _tool("ffprobe", "FFPROBE", (
+    "/opt/homebrew/opt/ffmpeg-full/bin/ffprobe",
+    "/usr/local/opt/ffmpeg-full/bin/ffprobe",
+))
 
 
 def clamp01(v: float) -> float:

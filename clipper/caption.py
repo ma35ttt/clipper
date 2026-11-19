@@ -77,6 +77,20 @@ def has_drawtext() -> bool:
     return "drawtext" in (p.stdout or "")
 
 
+@lru_cache(maxsize=1)
+def ass_available() -> bool:
+    """True when this ffmpeg can burn ``.ass`` subtitles (needs libass).
+
+    Homebrew's default ``ffmpeg`` bottle omits libass; ``ffmpeg-full`` is
+    keg-only. ``util`` prefers that build when it exists, and callers fall back
+    to the PNG popping captions when this returns False.
+    """
+    p = run([FFMPEG, "-hide_banner", "-filters"], timeout=30)
+    text = p.stdout or ""
+    return any(line.split()[1:2] == ["ass"] or line.split()[1:2] == ["subtitles"]
+               for line in text.splitlines() if len(line.split()) > 2)
+
+
 # --------------------------------------------------------------------------- #
 # real-font captions via ImageMagick (optional, auto-detected)
 #
@@ -632,6 +646,101 @@ def overlay_expr(layout: str = "vertical", style: str = "block") -> tuple[str, s
     else:
         y = "main_h*0.66"
     return x, y
+
+
+def _ass_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    hours, rest = divmod(seconds, 3600.0)
+    minutes, rest = divmod(rest, 60.0)
+    return f"{int(hours)}:{int(minutes):02d}:{rest:05.2f}"
+
+
+def _ass_colour(hex_colour: str, alpha: int = 0) -> str:
+    """ASS colours are ``&HAABBGGRR&`` — the reverse of CSS hex."""
+    text = (hex_colour or "#FFFFFF").lstrip("#")
+    if len(text) == 3:
+        text = "".join(ch * 2 for ch in text)
+    try:
+        red, green, blue = (int(text[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        red = green = blue = 255
+    return f"&H{alpha:02X}{blue:02X}{green:02X}{red:02X}&"
+
+
+def _ass_escape(text: str) -> str:
+    return (text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+            .replace("\r", " ").replace("\n", "\\N"))
+
+
+def build_ass(cues, path: Path, *, font: str = "Arial", font_px: int = 72,
+              fill: str = "#FFFFFF", outline: str = "#000000",
+              emphasis=(), emphasis_fill: str = HOOK_FILL,
+              y: int = 1560, pop: bool = True, margin: int = 64,
+              max_width: int = 980) -> bool:
+    """Write a self-contained ``.ass`` file for libass.
+
+    This is the post-session caption backend. It gives per-chunk colour,
+    karaoke-style word timing and a scale-in pop, and it is one text file to
+    restyle instead of dozens of PNGs. ``cues`` is whatever whisper returned;
+    the usual popping chunker is applied when ``pop`` is true.
+    """
+    from . import transcribe  # local import: transcribe only depends on util
+
+    chunks = transcribe.pop_chunks(cues) if pop else list(cues or ())
+    if not chunks:
+        return False
+    wanted = {re.sub(r"[^a-z0-9]", "", word.lower())
+              for word in (emphasis or ())}
+    normal = _ass_colour(fill)
+    hot = _ass_colour(emphasis_fill)
+    border = _ass_colour(outline)
+    font = (font or "Arial").strip() or "Arial"
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour,"
+        " OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut,"
+        " ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,"
+        " Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Pop,{font},{int(font_px)},{normal},{hot},{border},"
+        f"&H80000000&,1,0,0,0,100,100,0,0,1,5,1,2,"
+        f"{int(margin)},{int(margin)},{int(margin)},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV,"
+        " Effect, Text",
+    ]
+    for cue in chunks:
+        text = strip_emoji(cue.text) if has_emoji(cue.text) else cue.text
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+        words = text.split()
+        # Highlight the whole chunk when one of its words was picked as the
+        # stressed word: a gold chunk reads instantly at phone size.
+        keys = {re.sub(r"[^a-z0-9]", "", word.lower()) for word in words}
+        colour = hot if (wanted and keys & wanted) else ""
+        overrides = [r"\an5", f"\\pos(540,{int(y)})"]
+        if colour:
+            overrides.append(f"\\c{colour}")
+        if pop:
+            overrides += [r"\fscx84", r"\fscy84", r"\t(0,110,\fscx100\fscy100)"]
+        lines.append(
+            f"Dialogue: 0,{_ass_time(cue.start)},{_ass_time(cue.end)},Pop,,0,0,0,,"
+            f"{{{''.join(overrides)}}}{_ass_escape(text)}"
+        )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def subtitle_expr(layout: str = "vertical", style: str = "block") -> tuple[str, str]:

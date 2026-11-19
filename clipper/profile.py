@@ -28,10 +28,12 @@ from .config import (EDIT_MODES, LAYOUTS, SUBS_MODES, SUBS_STYLES,
 AUTO = {
     "layout": "split",
     "cam": "auto",
-    "subs": "on",
+    # Capture-only: the console finds the webcam and keeps the split frame.
+    # Hooks, captions and punch-ins are applied to chosen clips afterwards.
+    "subs": "off",
     "subs_style": "pop",
-    "title_mode": "auto",
-    "verify": "on",
+    "title_mode": "none",
+    "verify": "off",
     "threshold": 0.58,
     "confirm": 0.8,
     "cooldown": 30.0,
@@ -86,7 +88,7 @@ def autoconfigure(channel: str = "", source: str = "") -> tuple[dict, str]:
         values.update({"w_chat": 0.0, "w_audio": 0.60, "w_text": 0.40})
 
     label = "this console" if key == "console" else (name or "this stream")
-    detail = "pop captions, best installed whisper model"
+    detail = "capture-only, split frame, webcam follow"
     if platform == "YouTube":
         detail += ", audio-led triggers"
     return values, f"{label} preset · split frame · webcam follow · {detail}"

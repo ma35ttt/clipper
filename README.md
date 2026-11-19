@@ -1,14 +1,23 @@
 # clipper
 
 Watches a live stream, finds the moments people react to, and cuts them into
-ready-to-post vertical clips: 9:16, captioned, with a hook. It runs in realtime
-off a rolling buffer, so a clip is ready while the moment is still happening.
+9:16 clips. It runs in realtime off a rolling buffer, so a clip is ready while
+the moment is still happening.
+
+The live default is **capture-only**: find the webcam, keep the split frame, cut
+the clip. No captions, no hook and no editing are burned in while you stream, so
+a long session stays cheap on an 8 GB laptop. When the session ends, pick the
+clips worth posting and apply captions, a grounded hook and punch-ins in one
+pass. The console does both; the CLI is `clipper style`.
 
 No Python packages. Python 3.10+ and `ffmpeg` are all it needs.
 
 ```
 stream  ->  rolling 4-minute buffer  ->  score the moment (chat + audio)
-        ->  cut window  ->  9:16 mp4 + captions + hook + metadata
+        ->  cut window  ->  capture-only 9:16 mp4 + metadata
+                                   |
+                     session ends  v
+        chosen clips  ->  captions + hook + punch-ins  ->  styled mp4
 ```
 
 ---
@@ -120,12 +129,16 @@ py -3 -m clipper dashboard --open --out D:\clips
 
 ```bash
 cd ~/clipper
-brew install ffmpeg whisper-cpp imagemagick
+brew install ffmpeg-full whisper-cpp imagemagick
 python3 -m clipper models --get small.en
 python3 -m clipper models --get vad
 python3 -m clipper doctor
 python3 -m clipper dashboard --open
 ```
+
+Homebrew's regular `ffmpeg` bottle has no libass, so it cannot burn `.ass`
+captions. `ffmpeg-full` is keg-only and installs alongside it; clipper prefers it
+automatically. If it is missing, styled clips fall back to the PNG captions.
 
 macOS also gets **automatic webcam detection** for the `split` layout, using the
 system Vision framework. Nothing to install.
@@ -170,10 +183,12 @@ switches on immediately.
 `dashboard` opens a local control panel at <http://127.0.0.1:8756>. It is bound to
 your machine only; nothing is exposed to the network.
 
-- **AUTO** — one button: 9:16 split frame, webcam follow, popping captions, smart
-  hook, tuned trigger. Press again and your old settings come back.
+- **AUTO** — one button: split frame, webcam follow, capture-only, tuned trigger.
+  Press again and your old settings come back.
 - **Auto configure** — a per-streamer preset with the right names for the speech
-  decoder.
+  decoder. Still capture-only until you choose captions yourself.
+- **Style selected** — tick capture clips, pick a look, and clipper transcribes
+  them, writes the hook and adds punch-ins after the session (see below).
 - **REC** and **CLIP NOW** — force a clip from the rolling buffer.
 - **Edit & voice** — the two new toggles, described below.
 - **Add a stream** — paste a link; each streamer gets its own worker, folder and
@@ -199,6 +214,21 @@ cd %USERPROFILE%\clipper
 py -3 -m clipper vod https://www.twitch.tv/videos/123456789 --out D:\clips
 ```
 
+By default one run takes **12 clips**, not everything the stream ever did. The
+file `<work>/vod_history.json` remembers which moments each source has already
+given you, so running the same link again takes the **next** batch instead of
+duplicating the first one:
+
+```bash
+cd ~/clipper && python3 -m clipper vod https://www.twitch.tv/videos/123456789
+cd ~/clipper && python3 -m clipper vod https://www.twitch.tv/videos/123456789
+```
+
+`--max-clips N` changes the batch size, and `--reset` starts that source over
+from its strongest moments. On the console, leave the link in the box and press
+**Clip past stream** again; tick **start over** only when you want the first
+batch again.
+
 The same knobs apply: `--layout`, `--subs`, `--edit coldopen`, `--voice on`,
 `--threshold`, `--profile`, and so on. How it works:
 
@@ -216,13 +246,74 @@ The same knobs apply: `--layout`, `--subs`, `--edit coldopen`, `--voice on`,
 Useful extras:
 
 ```bash
---max-clips 15           # how many clips to make (default 15)
+--max-clips 12           # how many new clips this run may take (default 12)
+--reset                  # ignore the ledger and start this source over
 --chat-mode off          # audio only, no chat
 -c file:chat.jsonl       # score with a recorded chat instead
 ```
 
 `vod` is also a button on the console: paste a past-stream link into **Clip a
 past stream** and watch the progress bar in the panel.
+
+---
+
+## Style clips after the session
+
+Capture clips are deliberately plain. Styling one is a separate, chosen step:
+
+```bash
+cd ~/clipper
+python3 -m clipper style clips/20261119-2210_jynxzi_077.mp4 --style hype
+python3 -m clipper style --last 5 --style clean        # newest five captures
+python3 -m clipper styles                              # list every look
+```
+
+On Windows the same, with `py -3 -m clipper`:
+
+```bat
+cd %USERPROFILE%\clipper
+py -3 -m clipper style clips\name.mp4 --style hype
+```
+
+A styled copy lands beside the capture as `<name>_<style>.mp4`; the original is
+never overwritten. The sidecar records the transcript, the hook and the punch-in
+plan. On the console, tick the clips in **clips**, choose a style in the dropdown
+and press **Style selected**.
+
+What a style controls:
+
+- **Captions** — popping chunks or block lines, burned with libass (`.ass`) when
+  the installed ffmpeg has it, PNG overlays otherwise. Subtitles stay white.
+- **Hook** — the same grounded source as live: repeated chat, a real question, a
+  quotable line, or nothing. Gold title face, black outline.
+- **Punch-ins** — 0–3 short crops (max 1.25x) on the stressed words. One-pass
+  `crop`/`scale`, never `zoompan`.
+- **Cold open** — optional "payoff first, then rewind".
+- **Voice** — the live rung is available, but off in the built-in looks.
+
+Built-in looks: `clean`, `hype`, `cinematic`, `podcast`, `raw`.
+
+## Styles from reference reels
+
+Drop reference clips (your own or accounts you have permission to learn from)
+into a folder and let clipper measure their pacing:
+
+```bash
+cd ~/clipper
+python3 -m clipper styles --scan ~/Movies/references
+```
+
+It counts hard cuts, cuts per minute and average shot length, then categorises
+each reference as `rapid-fire`, `hype`, `montage`, `clean` or `podcast` and saves
+a matching style under `.clipper/styles/ref-*.json`. Use it like any other style:
+
+```bash
+python3 -m clipper style --last 3 --style ref-that-reel
+```
+
+This copies **rhythm**, not artwork: fonts, memes and B-roll still need to be
+sourced and placed deliberately. The report is written to
+`.clipper/styles/report.json`.
 
 ---
 
@@ -369,13 +460,13 @@ blurred frame and the worker log says so.
 
 ## Captions
 
-Subtitles are burned from speech recognition over the exact audio window of the
-clip, on by default when a model is available.
+Subtitles can be burned while capturing, but the default is **off**: post-session
+styling is where captions normally happen, and the live path stays cheap.
 
 ```bash
+--subs off             # default: capture only
 --subs auto            # on if a model is installed
---subs on              # force
---subs off             # never
+--subs on              # force captions on the live clip
 --subs-style pop       # popping word-chunks (default)
 --subs-style block     # multi-line block
 --subs-model models/ggml-medium.en.bin
@@ -413,7 +504,9 @@ The result is logged per clip, for example `caption gate: kept 12/31 word(s)`.
 
 ## Hook captions
 
-With `--title-mode auto` the hook comes from the clip, never from a template:
+The default is `--title-mode none`; hooks are added by `clipper style` or by
+turning this on. With `--title-mode auto` the hook comes from the clip, never
+from a template:
 
 1. a phrase **chat keeps repeating**, from at least two different people;
 2. a **genuine question** the streamer asked;
@@ -462,6 +555,8 @@ version:
 
 ```bash
 cd ~/clipper && python3 -m clipper vod https://www.twitch.tv/videos/123456789
+cd ~/clipper && python3 -m clipper style clips/name.mp4 --style hype
+cd ~/clipper && python3 -m clipper styles --scan ~/Movies/references
 cd ~/clipper && python3 -m clipper update
 ```
 

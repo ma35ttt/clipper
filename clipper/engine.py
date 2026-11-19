@@ -18,6 +18,7 @@ from pathlib import Path
 from . import __version__
 from . import edit as edit_mod
 from . import profile
+from . import styles as styles_mod
 from . import voice as voice_mod
 from .audio import LoudnessAnalyzer
 from .chat import ChatEvent, make_chat, normalize_channel, parse_target
@@ -187,6 +188,10 @@ class Engine:
         self._vod_job: dict | None = None
         self._vod_lock = threading.Lock()
         self._vod_stop = threading.Event()
+        # Post-session styling job: separate from VOD, one at a time.
+        self._style_job: dict | None = None
+        self._style_lock = threading.Lock()
+        self._style_stop = threading.Event()
         # -- console state ---------------------------------------------
         # A small ring of recent log lines so the website can show activity
         # without tailing a file.
@@ -334,8 +339,8 @@ class Engine:
             except ValueError:
                 pass
             self._auto = True
-            self.log("auto on — vertical frame, webcam follow, synced captions, "
-                     "hook from chat or the clip")
+            self.log("auto on — split frame, webcam follow, capture-only; "
+                     "style chosen clips when the session ends")
         else:
             if self._manual_before_auto:
                 try:
@@ -483,14 +488,17 @@ class Engine:
         return result
 
     # -- past streams (the VOD section) --------------------------------
-    def start_vod(self, link: str, name: str = "", max_clips: int = 15,
-                  chat_mode: str = "auto") -> dict:
+    def start_vod(self, link: str, name: str = "", max_clips: int = 12,
+                  chat_mode: str = "auto", reset: bool = False) -> dict:
         """Analyse a finished stream on a background thread and render its best
         moments. Tuning is inherited from the running console, so this is the
         same frame, captions, hook and cold open the live path makes."""
         link = (link or "").strip()
         if not link:
             return {"ok": False, "error": "paste a link to a past stream first"}
+        if self._style_job is not None and self._style_job.get("running"):
+            return {"ok": False,
+                    "error": "clips are being styled — wait for that to finish"}
         with self._vod_lock:
             if self._vod_job is not None and self._vod_job.get("running"):
                 return {"ok": False,
@@ -502,12 +510,12 @@ class Engine:
         self._vod_stop = threading.Event()
         self.log(f"past stream — analysing {link}")
         threading.Thread(target=self._vod_worker,
-                         args=(link, name, max_clips, chat_mode),
+                         args=(link, name, max_clips, chat_mode, reset),
                          daemon=True, name="vod").start()
         return {"ok": True, "vod": self.vod_snapshot()}
 
     def _vod_worker(self, link: str, name: str, max_clips: int,
-                    chat_mode: str) -> None:
+                    chat_mode: str, reset: bool = False) -> None:
         from . import vod as vod_mod
 
         cfg = copy.copy(self.cfg)          # shallow: same tuning, own engine
@@ -518,7 +526,7 @@ class Engine:
         job = self._vod_job or {}
         try:
             code = vod_mod.run(cfg, link, max_clips=max_clips,
-                               chat_mode=chat_mode, log=self.log,
+                               chat_mode=chat_mode, reset=reset, log=self.log,
                                should_stop=self._vod_stop.is_set,
                                state=job.setdefault("state", {}))
             job["ok"] = code == 0
@@ -559,6 +567,80 @@ class Engine:
             "total": total,
             "rendered": int(state.get("clips") or state.get("rendered") or 0),
             "found": int(state.get("found") or total),
+            "fresh": int(state.get("fresh") or total),
+            "note": state.get("note", ""),
+            "error": job.get("error", "") or state.get("error", ""),
+        }
+
+    # -- post-session styling ------------------------------------------
+    def start_style(self, files: list[str], style: str = "clean") -> dict:
+        """Style selected clips from the session on a background thread."""
+        files = [str(name) for name in (files or []) if str(name).strip()]
+        if not files:
+            return {"ok": False, "error": "select at least one clip"}
+        if self._vod_job is not None and self._vod_job.get("running"):
+            return {"ok": False,
+                    "error": "a past stream is still rendering — wait for it to finish"}
+        with self._style_lock:
+            if self._style_job is not None and self._style_job.get("running"):
+                return {"ok": False, "error": "clips are already being styled"}
+            self._style_job = {"running": True, "style": style or "clean",
+                               "error": "", "state": {}}
+        self._style_stop = threading.Event()
+        self.log(f"style — applying {style or 'clean'} to {len(files)} clip(s)")
+        threading.Thread(target=self._style_worker, args=(files, style or "clean"),
+                         daemon=True, name="style").start()
+        return {"ok": True, "style": self.style_snapshot()}
+
+    def _style_worker(self, files: list[str], style: str) -> None:
+        from . import restyle
+
+        cfg = copy.copy(self.cfg)
+        cfg.dashboard = False
+        cfg.console = False
+        job = self._style_job or {}
+        try:
+            code = restyle.run(cfg, files, style, log=self.log,
+                               should_stop=self._style_stop.is_set,
+                               state=job.setdefault("state", {}))
+            job["ok"] = code == 0
+        except Exception as exc:  # noqa: BLE001 - styling must not kill the console
+            job["error"] = f"{type(exc).__name__}: {exc}"
+            self.log(f"style crashed — {job['error']}")
+            job["ok"] = False
+        finally:
+            job["running"] = False
+            job["done_at"] = time.strftime("%H:%M:%S")
+            state = job.get("state") or {}
+            if state.get("phase") not in ("done", "error"):
+                state["phase"] = "done"
+
+    def stop_style(self) -> dict:
+        job = self._style_job
+        if job is None or not job.get("running"):
+            return {"ok": False, "error": "no clips are being styled"}
+        self._style_stop.set()
+        self.log("style — stopping after the current clip")
+        return {"ok": True, "note": "stopping after the current clip"}
+
+    def style_snapshot(self) -> dict:
+        job = self._style_job
+        if not job:
+            return {}
+        try:
+            state = dict(job.get("state") or {})
+        except RuntimeError:
+            state = {}
+        total = int(state.get("total") or 0)
+        return {
+            "running": bool(job.get("running")),
+            "style": job.get("style", ""),
+            "phase": state.get("phase", "starting"),
+            "index": int(state.get("index") or 0),
+            "total": total,
+            "rendered": int(state.get("clips") or 0),
+            "file": state.get("file", ""),
+            "done_at": job.get("done_at", ""),
             "error": job.get("error", "") or state.get("error", ""),
         }
 
@@ -1198,6 +1280,10 @@ class Engine:
                                    else self.cfg.layout)
             meta["title"] = pick_title(self.cfg, meta.get("signals", {}), cues,
                                        chat_for_hooks)
+            meta["capture_only"] = bool(
+                not meta["title"] and not (subtitles and cues)
+                and getattr(self.cfg, "edit_mode", "off") != "coldopen"
+                and getattr(self.cfg, "voice", "off") != "on")
             name = clip_filename(self.channel, meta["score"], meta.get("stamp"))
             out = self.cfg.out_dir / name
             index = 2
@@ -1342,13 +1428,16 @@ class Engine:
         except OSError:
             files = []
         for path in files:
-            entry = {"file": path.name, "title": "", "score": 0}
+            entry = {"file": path.name, "title": "", "score": 0,
+                     "styled": False, "style": ""}
             side = path.with_suffix(".json")
             if side.exists():
                 try:
                     data = json.loads(side.read_text())
                     entry["title"] = data.get("title") or ""
                     entry["score"] = int(round(float(data.get("score", 0)) * 100))
+                    entry["styled"] = bool(data.get("styled_from"))
+                    entry["style"] = data.get("style") or ""
                 except (OSError, ValueError):
                     pass
             clips.append(entry)
@@ -1362,6 +1451,11 @@ class Engine:
             "layout": self.cfg.layout,
             "cam": self.cfg.cam,
             "caption_style": getattr(self.cfg, "subs_style", "pop"),
+            "capture_only": bool(
+                getattr(self.cfg, "subs", "off") == "off"
+                and getattr(self.cfg, "title_mode", "none") == "none"
+                and getattr(self.cfg, "edit_mode", "off") == "off"
+                and getattr(self.cfg, "voice", "off") == "off"),
             "connected": self._ingest is not None and self._ingest.poll() is None,
             "uptime_h": f"{int(uptime // 3600)}h {int(uptime % 3600 // 60):02d}m",
             "buffer_h": f"{fmt_clock(now)} / {len(self.buf.segments)} segs",
@@ -1397,6 +1491,8 @@ class Engine:
             "streams_root": str(self.streams.root),
             "streams": self.streams.snapshot(),
             "vod": self.vod_snapshot(),
+            "style": self.style_snapshot(),
+            "styles": styles_mod.catalogue(self.cfg.work_dir),
             "log": list(self._log_ring)[-60:],
             "clips": clips,
         }

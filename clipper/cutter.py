@@ -529,9 +529,36 @@ class Cutter:
             title_file=work / "title.txt",
         )
 
+    def prepare_file(self, source: str | Path, job_id: str) -> Prepared | None:
+        """Wrap an existing file as a ``Prepared`` without re-encoding it.
+
+        Post-session styling starts from the clip the live run already wrote,
+        so this is the cheap entry point: a one-line concat list, no transcode,
+        no extra copy on the SSD.
+        """
+        path = Path(source)
+        info = probe(path)
+        if not info.get("width") or not info.get("duration"):
+            return None
+        work = self.tmp / job_id
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        listing = work / "concat.txt"
+        listing.write_text(f"file '{path.resolve().as_posix()}'\n", encoding="utf-8")
+        return Prepared(
+            work=work,
+            list_path=listing,
+            offset=0.0,
+            duration=float(info.get("duration") or 0.0),
+            width=int(info.get("width") or 0),
+            height=int(info.get("height") or 0),
+            title_file=work / "title.txt",
+        )
+
     # -- step 2: render -----------------------------------------------------
     def render(self, prepared: Prepared, out_path: Path, title: str,
-               cues: list | None = None) -> tuple[bool, str, str]:
+               cues: list | None = None,
+               options: dict | None = None) -> tuple[bool, str, str]:
         """Render the clip. Returns ``(ok, error, warning)``.
 
         Captions are nice to have, a clip is not — but subtitles are the whole
@@ -567,8 +594,8 @@ class Cutter:
         try:
             for attempt_title, attempt_cues, note in plan:
                 timeout = 900 if not warning else 600
-                result = run(self._args(prepared, tmp_out, attempt_title, attempt_cues),
-                             timeout=timeout)
+                result = run(self._args(prepared, tmp_out, attempt_title, attempt_cues,
+                                       options=options), timeout=timeout)
                 if result.returncode == 0:
                     warning = note
                     break
@@ -737,14 +764,15 @@ class Cutter:
         return " ".join(cue.text for cue in cues)
 
     def _args(self, prepared: Prepared, out_path: Path, title: str,
-              cues: list) -> list[str]:
+              cues: list, options: dict | None = None) -> list[str]:
         args = [
             FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-fflags", "+genpts", "-f", "concat", "-safe", "0",
             "-i", str(prepared.list_path),
         ]
 
-        graph, needs_filter, extra = self._graph(prepared, title, cues)
+        graph, needs_filter, extra = self._graph(prepared, title, cues,
+                                                 options=options)
         for path in extra:
             # 1 fps stills: far less decoder memory than the default rate.
             args += ["-loop", "1", "-framerate", "1", "-i", str(path)]
@@ -774,20 +802,49 @@ class Cutter:
         args += ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-ar", "48000"]
         return args
 
-    def _graph(self, prepared: Prepared, title: str,
-               cues: list) -> tuple[str, bool, list[Path]]:
+    def _graph(self, prepared: Prepared, title: str, cues: list,
+               options: dict | None = None) -> tuple[str, bool, list[Path]]:
         cfg = self.cfg
-        cam = self.cam_spec()
-        # No detected webcam means there is nothing to put across the top: show
-        # the blurred 9:16 frame instead of cropping a guessed region.
-        layout = "blur" if cfg.layout == "split" and not cam else cfg.layout
-        vertical = layout != "horizontal"
-        style = self.caption_style()
-        if layout == "horizontal" and not title and not cues:
-            return "", False, []
+        opts = dict(options or {})
+        composed = bool(opts.get("composed"))
+        style = opts.get("caption_style") or self.caption_style()
+        caption_fill = opts.get("caption_fill") or "white"
+        emphasis_fill = opts.get("emphasis_fill") or caption.HOOK_FILL
+        emphasis = {re.sub(r"[^a-z0-9]", "", str(w).lower())
+                    for w in (opts.get("emphasis") or ())}
+        backend = opts.get("subs_backend") or "png"
+        punchins = [p for p in (opts.get("punchins") or ())
+                    if float(p.get("end", 0)) > float(p.get("start", 0))]
+
+        if composed:
+            # The input is already a finished vertical clip; restyling only
+            # adds overlays and punch-ins, so the split layout must not run a
+            # second time. ``composed_layout`` is used for positioning only.
+            cam = ""
+            layout = opts.get("composed_layout") or "split"
+            vertical = True
+            if (not title and not cues and not punchins
+                    and (prepared.width, prepared.height) == (1080, 1920)):
+                return "", False, []
+        else:
+            cam = self.cam_spec()
+            # No detected webcam means there is nothing to put across the top:
+            # show the blurred 9:16 frame instead of cropping a guessed region.
+            layout = "blur" if cfg.layout == "split" and not cam else cfg.layout
+            vertical = layout != "horizontal"
+            if layout == "horizontal" and not title and not cues:
+                return "", False, []
 
         parts: list[str] = []
-        if layout == "vertical":
+        if composed:
+            if (prepared.width, prepared.height) == (1080, 1920):
+                parts.append("[0:v]setsar=1[vbase]")
+            else:
+                parts.append(
+                    "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                    "crop=1080:1920,setsar=1[vbase]"
+                )
+        elif layout == "vertical":
             parts.append(
                 "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
                 "crop=1080:1920,setsar=1[vbase]"
@@ -811,11 +868,38 @@ class Cutter:
         current = "vbase"
         index = 1
         geo = (split_geometry(cam, prepared.width, prepared.height)
-               if layout == "split" else None)
+               if layout == "split" and not composed else None)
         sub_margin = 64 if vertical else 40
         sub_ratio = 0.095 if style == "pop" else 0.062
         sub_estimate = (int(1080 * sub_ratio * 1.7) if vertical else 160)
-        game_bottom = (geo.cam_h + geo.game_h) if geo else 1920
+        game_bottom = (geo.cam_h + geo.game_h) if geo else (1920 if composed else 1920)
+
+        # Punch-ins: crop a slightly smaller window and scale it back up for a
+        # short window, then switch back. This is a single-pass filter, unlike
+        # ``zoompan`` which re-renders every frame and stalls this laptop.
+        for number, punch in enumerate(punchins):
+            try:
+                zoom = max(1.0, min(float(punch.get("zoom", 1.12)), 1.25))
+                start = max(0.0, float(punch.get("start", 0.0)))
+                end = max(start, float(punch.get("end", start + 0.6)))
+                fx = max(0.0, min(float(punch.get("x", 0.5)), 1.0))
+                fy = max(0.0, min(float(punch.get("y", 0.5)), 1.0))
+            except (TypeError, ValueError):
+                continue
+            crop_w = _even(1080 / zoom)
+            crop_h = _even(1920 / zoom)
+            crop_x = _even((1080 - crop_w) * fx)
+            crop_y = _even((1920 - crop_h) * fy)
+            parts.append(f"[{current}]split=2[pin{number}][pcrop{number}]")
+            parts.append(
+                f"[pcrop{number}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+                f"scale=1080:1920,setsar=1[pzoom{number}]"
+            )
+            parts.append(
+                f"[pin{number}][pzoom{number}]overlay=0:0:"
+                f"enable='between(t,{start:.3f},{end:.3f})'[vpunch{number}]"
+            )
+            current = f"vpunch{number}"
 
         def draw_png(text: str, path: Path, font_px: int, max_width: int,
                      pop: bool = False, font: str | None = None,
@@ -860,7 +944,7 @@ class Cutter:
             emoji = caption.has_emoji(title) and caption.can_render_emoji()
             if not emoji:
                 title = caption.strip_emoji(title)
-            if caption.has_drawtext() and font and not emoji:
+            if caption.has_drawtext() and font and not emoji and not composed:
                 prepared.title_file.write_text(_wrap(title.upper()), encoding="utf-8")
                 size = int(1080 * 0.062) if vertical else int(max(320, prepared.height or 720) * 0.072)
                 if geo:
@@ -888,7 +972,7 @@ class Cutter:
                     font_px = max(28, min(font_px, fitting))
                 _, height = draw_png(
                     title, prepared.work / "title.png", font_px, max_width,
-                    font=hook_font, fill=caption.HOOK_FILL,
+                    font=hook_font, fill=opts.get("hook_fill") or caption.HOOK_FILL,
                     char_width=0.72 if hook_font else 0.56,
                     emoji=emoji,
                 )
@@ -898,16 +982,48 @@ class Cutter:
                     limit = 1920 - sub_margin - sub_estimate - height - 20
                     y = str(max(game_bottom + 18, limit))
                     x = "(main_w-overlay_w)/2"
+                elif composed:
+                    # A composed split clip already has the empty caption band
+                    # baked in: park the hook at the top of it and the subtitles
+                    # at the bottom.
+                    x = "(main_w-overlay_w)/2"
+                    y = "main_h*0.715" if layout == "split" else "main_h*0.085"
                 else:
                     x, y = caption.overlay_expr(layout, style)
                 overlay_png(x, y)
 
-        if cues:
+        drew_ass = False
+        if cues and backend == "ass" and caption.ass_available():
+            ass_y = 1775 if layout == "split" else 1540
+            ass_path = prepared.work / "subs.ass"
+            drew_ass = caption.build_ass(
+                cues, ass_path,
+                font=opts.get("ass_font") or "Arial",
+                font_px=int(opts.get("ass_font_px")
+                            or (1080 * sub_ratio)),
+                fill=caption_fill,
+                outline=opts.get("caption_outline") or "#000000",
+                # Subtitles stay white in every style; emphasis is expressed by
+                # the punch-in on that word, not by recolouring the caption.
+                emphasis=(),
+                emphasis_fill=emphasis_fill,
+                y=ass_y,
+                pop=(style == "pop"),
+                max_width=int(1080 * 0.92),
+            )
+            if drew_ass:
+                escaped = (str(ass_path.resolve())
+                           .replace("\\", "\\\\").replace(":", "\\:")
+                           .replace("'", "\\'"))
+                parts.append(f"[{current}]ass=filename='{escaped}'[vass]")
+                current = "vass"
+
+        if cues and not drew_ass:
             shown = transcribe.pop_chunks(cues) if style == "pop" else cues
             base = 1080 if vertical else max(320, prepared.width or 1280)
             max_width = int((1080 if vertical else (prepared.width or 1280)) * 0.92)
             font_px = int(base * sub_ratio)
-            if geo:
+            if geo or (composed and layout == "split"):
                 x, y = "(main_w-overlay_w)/2", f"main_h-{sub_margin}-overlay_h"
             else:
                 x, y = caption.subtitle_expr(layout, style)
@@ -915,6 +1031,7 @@ class Cutter:
                 draw_png(
                     cue.text, prepared.work / f"sub_{position:03d}.png",
                     font_px, max_width, pop=(style == "pop"),
+                    fill=caption_fill,
                 )
                 overlay_png(x, y, window=(cue.start, cue.end))
 

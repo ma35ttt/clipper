@@ -282,6 +282,29 @@ PAGE = """<!doctype html>
   .vodcard input:focus { outline: none; border-color: var(--blue);
                          box-shadow: 0 0 0 2px rgba(106,168,255,.18); }
   .vodcard .vnote { color: var(--faint); font-size: 11.5px; margin-top: 10px; line-height: 1.4; }
+  .vodcard .vnum, .vodcard .vcheck {
+    display: inline-flex; align-items: center; gap: 6px; color: var(--dim);
+    font-size: 11.5px; letter-spacing: .02em;
+  }
+  .vodcard .vnum input {
+    width: 56px; background: rgba(8,10,15,.55); border: 1px solid var(--line2);
+    color: var(--text); border-radius: 8px; padding: 7px 8px; font-size: 12px;
+  }
+  .vodcard .vcheck input { accent-color: var(--blue); }
+  .walltools { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .walltools select {
+    background: var(--panel2); border: 1px solid var(--line2); color: var(--text);
+    border-radius: 9px; padding: 7px 9px; font-size: 12px;
+  }
+  .stylestatus {
+    display: flex; justify-content: space-between; gap: 12px; margin: 8px 0 2px;
+    padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel2); color: var(--dim); font-size: 12px;
+  }
+  .stylestatus b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .clip .pick { display: flex; align-items: center; gap: 7px; color: var(--dim);
+                font-size: 11.5px; }
+  .clip .pick input { accent-color: var(--blue); }
   .vodbar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.07);
             overflow: hidden; margin-top: 11px; }
   .vodbar > i { display: block; height: 100%; width: 0%; border-radius: 99px;
@@ -400,10 +423,16 @@ PAGE = """<!doctype html>
         <input type="text" id="vodinput" spellcheck="false" autocomplete="off"
                aria-label="past stream link"
                placeholder="https://twitch.tv/videos/123456789  ·  https://youtu.be/...">
+        <label class="vnum" title="how many clips this run may take">clips
+          <input type="number" id="vodmax" min="1" max="60" value="12">
+        </label>
+        <label class="vcheck" title="ignore clips taken from this source in earlier runs">
+          <input type="checkbox" id="vodreset"> start over
+        </label>
         <button class="btn magic" id="vodbtn" onclick="startVod()"
                 title="find the best moments in a finished stream and cut clips from it">Clip past stream</button>
       </div>
-      <div class="vnote" id="vodnote">Analyses a finished Twitch VOD, YouTube video or local recording and cuts its strongest moments — the same frame, captions and hook as live.</div>
+      <div class="vnote" id="vodnote">Analyses a finished stream and cuts up to 12 new moments. Run it again for the next batch — already-clipped moments are remembered per source.</div>
       <div class="vodbar hidden" id="vodbar"><i id="vodfill"></i></div>
       <div class="vodstatus hidden" id="vodstatus"><span id="vodphase">starting…</span><b id="vodcount"></b></div>
     </div>
@@ -431,7 +460,16 @@ PAGE = """<!doctype html>
     <pre class="log" id="log">no activity yet</pre>
   </section>
   <section>
-    <div class="wall-head"><h2>clips</h2><span class="count" id="count">nothing yet</span></div>
+    <div class="wall-head">
+      <h2>clips</h2>
+      <div class="walltools">
+        <select id="stylepick" aria-label="editing style"></select>
+        <button class="btn ghost" id="stylebtn" onclick="styleSelected()"
+                title="transcribe, hook and punch-in the selected capture-only clips">Style selected</button>
+        <span class="count" id="count">nothing yet</span>
+      </div>
+    </div>
+    <div class="stylestatus hidden" id="stylestatus"><span id="stylenote"></span><b id="stylecount"></b></div>
     <div class="grid" id="wall"></div>
   </section>
 </main>
@@ -613,12 +651,56 @@ async function startVod() {
   if (!link) { toast('paste a link to a past stream first', true); return; }
   const btn = $('vodbtn');
   btn.disabled = true; btn.textContent = 'Starting...';
-  const r = await postJSON('/api/vod', {url: link, name: $('nameinput').value.trim()});
+  const r = await postJSON('/api/vod', {
+    url: link,
+    name: $('nameinput').value.trim(),
+    max_clips: Number($('vodmax').value || 12),
+    reset: $('vodreset').checked,
+  });
   btn.disabled = false; btn.textContent = 'Clip past stream';
   if (!r) return;
   if (r.ok === false) return toast(r.error || 'could not start', true);
-  input.value = '';
+  // Keep the link in the box: pressing the button again takes the next batch.
   toast('analysing the past stream — watch the activity log');
+}
+
+/* -- post-session styling ------------------------------------------- */
+async function styleSelected() {
+  const files = [...document.querySelectorAll('.clipick:checked')].map(el => el.value);
+  if (!files.length) { toast('tick the clips you want to style first', true); return; }
+  const btn = $('stylebtn'), style = $('stylepick').value || 'clean';
+  btn.disabled = true; btn.textContent = 'Starting...';
+  const r = await postJSON('/api/style', {files, style});
+  btn.disabled = false; btn.textContent = 'Style selected';
+  if (!r) return;
+  if (r.ok === false) return toast(r.error || 'could not start', true);
+  toast('styling ' + files.length + ' clip(s) — captions and punch-ins take a minute');
+}
+
+function renderStyles(list) {
+  const pick = $('stylepick');
+  if (!pick || !list) return;
+  const current = pick.value;
+  pick.innerHTML = list.map(s =>
+    `<option value="${esc(s.name)}">${esc(s.label)}</option>`).join('');
+  if (current && list.some(s => s.name === current)) pick.value = current;
+}
+
+function renderStyleJob(v) {
+  const box = $('stylestatus'), note = $('stylenote'), count = $('stylecount');
+  if (!v || (!v.running && !v.phase)) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  if (v.running) {
+    note.textContent = (v.style ? v.style + ' · ' : '') + 'styling ' + (v.file || '...');
+    count.textContent = (v.rendered || 0) + ' / ' + (v.total || 0);
+  } else if (v.error) {
+    note.textContent = 'styling failed: ' + v.error;
+    count.textContent = '';
+  } else {
+    note.textContent = 'styling finished — ' + (v.rendered || 0) + ' clip(s) added';
+    count.textContent = '';
+    setTimeout(() => box.classList.add('hidden'), 6000);
+  }
 }
 
 async function stopVod() {
@@ -662,8 +744,9 @@ function renderVod(v) {
     note.textContent = 'error: ' + v.error;
     note.style.color = 'var(--hot)';
   } else {
-    note.textContent = 'Analyses a finished Twitch VOD, YouTube video or local recording '
-      + 'and cuts its strongest moments — the same frame, captions and hook as live.';
+    note.textContent = 'Cuts up to ' + (($('vodmax') && $('vodmax').value) || 12)
+      + ' new moments. Run it again for the next batch; the ledger per source '
+      + 'stops it repeating clips.';
     note.style.color = '';
   }
 }
@@ -951,7 +1034,8 @@ async function tick() {
       : (s.cooldown > 0 ? Math.ceil(s.cooldown) + 's cooldown' : 'ready');
     $('m-layout').textContent = 'layout ' + (s.layout || '—');
     $('m-cam').textContent = 'cam ' + (s.cam || '—');
-    $('m-style').textContent = 'subs ' + (s.caption_style || '—');
+    $('m-style').textContent = s.capture_only ? 'capture only'
+      : 'subs ' + (s.caption_style || '—');
     $('m-enc').textContent = 'enc ' + (s.encoder || '—');
     $('dot').style.background = s.connected || s.console ? 'var(--cool)' : 'var(--hot)';
     $('conn').textContent = s.console ? 'console' : (s.connected ? 'live' : 'offline');
@@ -959,6 +1043,8 @@ async function tick() {
     renderRec(s);
     renderStreams(s);
     renderVod(s.vod);
+    renderStyleJob(s.style);
+    renderStyles(s.styles);
     renderLog(s.log);
     history.push(s.score || 0);
     if (history.length > MAXH) history.shift();
@@ -986,6 +1072,10 @@ function renderWall(clips) {
         <span class="title" title="${esc(c.title)}">${esc(c.title || c.file)}</span>
         <span class="pill">${esc(c.score)}</span>
       </div>
+      <label class="pick">
+        ${c.styled ? '<span class="chip">' + esc(c.style || 'styled') + '</span>'
+                   : '<input type="checkbox" class="clipick" value="' + esc(c.file) + '"> style this'}
+      </label>
       <div class="actions">
         <a class="iconbtn" href="/clips/${encodeURIComponent(c.file)}?download=1" download>download</a>
         <button class="iconbtn" onclick="copyPath('${esc(c.file)}')">copy path</button>
@@ -1117,17 +1207,28 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(engine.retry_stream(str(body.get("name") or "")))
             if path == "/api/vod":
                 try:
-                    max_clips = int(body.get("max_clips") or 15)
+                    max_clips = int(body.get("max_clips") or 12)
                 except (TypeError, ValueError):
-                    max_clips = 15
+                    max_clips = 12
                 return self._json(engine.start_vod(
                     str(body.get("url") or body.get("link") or ""),
                     str(body.get("name") or ""),
                     max(1, min(max_clips, 60)),
                     str(body.get("chat_mode") or "auto"),
+                    bool(body.get("reset")),
                 ))
             if path == "/api/vod/stop":
                 return self._json(engine.stop_vod())
+            if path == "/api/style":
+                files = body.get("files")
+                if not isinstance(files, list):
+                    files = []
+                return self._json(engine.start_style(
+                    [str(name) for name in files],
+                    str(body.get("style") or "clean"),
+                ))
+            if path == "/api/style/stop":
+                return self._json(engine.stop_style())
             if path == "/api/update":
                 action = str(body.get("action") or "check")
                 return self._json(engine.run_update() if action == "apply"

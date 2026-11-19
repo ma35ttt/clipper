@@ -72,9 +72,12 @@ class Config:
     layout: str = "split"
     cam: str = "auto"          # webcam box x:y:w:h, used by --layout split
     cam_interval: float = 90.0  # seconds between automatic camera re-detection
-    title_mode: str = "auto"
+    # Capture-only is the default: split frame, webcam follow, no burned-in
+    # hook or captions. Styling is chosen per clip after the session, so a long
+    # live run never spends memory rasterising captions nobody asked for.
+    title_mode: str = "none"
     title: str = ""
-    subs: str = "auto"        # auto | on | off — burn in speech subtitles
+    subs: str = "off"         # auto | on | off — burn in speech subtitles
     subs_style: str = "pop"   # pop | block — popping word-chunks, or a text block
     subs_model: str | None = None
     subs_language: str = "en"
@@ -88,7 +91,7 @@ class Config:
     voice: str = "off"
     voice_max: float = 10.0   # seconds of narration to allow
     voice_name: str = ""      # piper voice / system voice; blank = auto
-    verify: str = "auto"      # auto | on | off — verify candidates with a fast transcript
+    verify: str = "off"       # auto | on | off — verify candidates with a fast transcript
     verify_interval: float = 15.0   # minimum seconds between verifications
     verify_window: float = 10.0     # seconds of audio to transcribe per verification
     encoder: str = "auto"
