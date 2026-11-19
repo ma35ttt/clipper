@@ -355,12 +355,17 @@ def expand_to_cam(face: Face, src_w: int, src_h: int) -> tuple[int, int, int, in
 
 
 def _ffmpeg_grab(url: str, out_dir: Path, frames: int, fps: float,
-                 timeout: float) -> list[Path]:
+                 timeout: float, seek: float | None = None) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
     if url.lower().startswith("http"):
         cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
-    if _is_hls(url):
+    if seek is not None and seek > 0:
+        # A finished stream: jump straight to a moment the streamer is on
+        # camera, instead of sampling the very start (often a "starting soon"
+        # slate or a menu screen with no face).
+        cmd += ["-ss", f"{float(seek):.3f}"]
+    elif _is_hls(url):
         # A live playlist starts at its oldest segment by default, which on a
         # long buffer means detecting the streamer from a minute-old frame.
         # Sample the newest few segments instead, so the box matches now.
@@ -383,15 +388,20 @@ def _ffmpeg_grab(url: str, out_dir: Path, frames: int, fps: float,
 
 def detect(url: str, work_dir: Path, frames: int = SAMPLE_FRAMES,
            fps: float = SAMPLE_FPS, timeout: float = 120.0,
+           seek: float | None = None,
            log=lambda message: None) -> tuple[int, int, int, int] | None:
-    """Detect the webcam box in the source. Returns ``x:y:w:h`` pixels or None."""
+    """Detect the webcam box in the source. Returns ``x:y:w:h`` pixels or None.
+
+    ``seek`` jumps into a finished stream before sampling, which is what the
+    past-stream path passes; live callers leave it unset.
+    """
     scratch = work_dir / "cam"
     try:
         tool = _tool_for(str(work_dir))
         if tool is None:
             return None
         shutil.rmtree(scratch, ignore_errors=True)
-        images = _ffmpeg_grab(url, scratch, frames, fps, timeout)
+        images = _ffmpeg_grab(url, scratch, frames, fps, timeout, seek=seek)
         if len(images) < 2:
             return None
         sampled = faces_in_dir(tool, scratch)

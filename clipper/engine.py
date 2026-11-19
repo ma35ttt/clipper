@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import queue
 import re
@@ -181,6 +182,11 @@ class Engine:
         self.dashboard: Dashboard | None = None
         # Extra streamers added from the console, each a separate worker process.
         self.streams = StreamManager(self)
+        # Past-stream (VOD) job: one at a time, run on a background thread so the
+        # console keeps its live score while an old stream is analysed.
+        self._vod_job: dict | None = None
+        self._vod_lock = threading.Lock()
+        self._vod_stop = threading.Event()
         # -- console state ---------------------------------------------
         # A small ring of recent log lines so the website can show activity
         # without tailing a file.
@@ -461,6 +467,100 @@ class Engine:
             return {"ok": False, "error": str(exc)}
         self.log(f"clip deleted → {target.name}")
         return {"ok": True}
+
+    # -- updating (the header button) ----------------------------------
+    def check_update(self) -> dict:
+        from . import update as update_mod
+
+        return update_mod.check(log=self.log)
+
+    def run_update(self) -> dict:
+        from . import update as update_mod
+
+        result = update_mod.run(log=self.log)
+        if result.get("updated"):
+            self.log("update applied — restart the console to load it")
+        return result
+
+    # -- past streams (the VOD section) --------------------------------
+    def start_vod(self, link: str, name: str = "", max_clips: int = 15,
+                  chat_mode: str = "auto") -> dict:
+        """Analyse a finished stream on a background thread and render its best
+        moments. Tuning is inherited from the running console, so this is the
+        same frame, captions, hook and cold open the live path makes."""
+        link = (link or "").strip()
+        if not link:
+            return {"ok": False, "error": "paste a link to a past stream first"}
+        with self._vod_lock:
+            if self._vod_job is not None and self._vod_job.get("running"):
+                return {"ok": False,
+                        "error": "a past stream is already being clipped"}
+            self._vod_job = {
+                "running": True, "link": link, "name": name or "",
+                "error": "", "state": {},
+            }
+        self._vod_stop = threading.Event()
+        self.log(f"past stream — analysing {link}")
+        threading.Thread(target=self._vod_worker,
+                         args=(link, name, max_clips, chat_mode),
+                         daemon=True, name="vod").start()
+        return {"ok": True, "vod": self.vod_snapshot()}
+
+    def _vod_worker(self, link: str, name: str, max_clips: int,
+                    chat_mode: str) -> None:
+        from . import vod as vod_mod
+
+        cfg = copy.copy(self.cfg)          # shallow: same tuning, own engine
+        cfg.name = name or self.cfg.name
+        cfg.dashboard = False
+        cfg.console = False
+        cfg.profiles = getattr(self.cfg, "profiles", True)
+        job = self._vod_job or {}
+        try:
+            code = vod_mod.run(cfg, link, max_clips=max_clips,
+                               chat_mode=chat_mode, log=self.log,
+                               should_stop=self._vod_stop.is_set,
+                               state=job.setdefault("state", {}))
+            job["ok"] = code == 0
+        except Exception as exc:  # noqa: BLE001 - a bad VOD must not kill the console
+            job["error"] = f"{type(exc).__name__}: {exc}"
+            self.log(f"past stream crashed — {job['error']}")
+            job["ok"] = False
+        finally:
+            job["running"] = False
+            state = job.get("state") or {}
+            if state.get("phase") not in ("done", "error"):
+                state["phase"] = "done"
+
+    def stop_vod(self) -> dict:
+        job = self._vod_job
+        if job is None or not job.get("running"):
+            return {"ok": False, "error": "no past stream is being clipped"}
+        self._vod_stop.set()
+        self.log("past stream — stopping after the current clip")
+        return {"ok": True, "note": "stopping after the current clip"}
+
+    def vod_snapshot(self) -> dict:
+        job = self._vod_job
+        if not job:
+            return {}
+        try:
+            state = dict(job.get("state") or {})
+        except RuntimeError:          # the worker mutated it mid-copy
+            state = {}
+        total = int(state.get("total") or 0)
+        index = int(state.get("index") or 0)
+        return {
+            "running": bool(job.get("running")),
+            "link": job.get("link", ""),
+            "name": job.get("name", ""),
+            "phase": state.get("phase", "starting"),
+            "index": index,
+            "total": total,
+            "rendered": int(state.get("clips") or state.get("rendered") or 0),
+            "found": int(state.get("found") or total),
+            "error": job.get("error", "") or state.get("error", ""),
+        }
 
     # -- extra streams (the link section) ------------------------------
     def add_stream(self, link: str, name: str = "", mode: str = "ask") -> dict:
@@ -1296,6 +1396,7 @@ class Engine:
             "out_dir": str(self.cfg.out_dir),
             "streams_root": str(self.streams.root),
             "streams": self.streams.snapshot(),
+            "vod": self.vod_snapshot(),
             "log": list(self._log_ring)[-60:],
             "clips": clips,
         }

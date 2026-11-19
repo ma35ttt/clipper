@@ -25,7 +25,9 @@ from clipper import pack  # noqa: E402
 from clipper import profile  # noqa: E402
 from clipper import streams  # noqa: E402
 from clipper import transcribe  # noqa: E402
+from clipper import update as update_mod  # noqa: E402
 from clipper import voice  # noqa: E402
+from clipper import vod as vod_mod  # noqa: E402
 from clipper.chat import ChatEvent, normalize_channel  # noqa: E402
 from clipper.config import Config, parse_cam  # noqa: E402
 from clipper.cutter import (Cutter, chat_reaction, hook_from_chat,  # noqa: E402
@@ -1442,6 +1444,188 @@ class DashboardTest(unittest.TestCase):
         self.assertGreater(len(ports), 1)
         explicit = Dashboard(None, 9000, Path("."))
         self.assertEqual(explicit._ports_to_try(), [9000])
+
+    def test_page_wires_the_past_stream_and_update_controls(self):
+        from clipper.dashboard import PAGE
+
+        for endpoint in ("/api/vod", "/api/vod/stop", "/api/update"):
+            self.assertIn(endpoint, PAGE, endpoint)
+        for key in ("vodinput", "vodbtn", "updbtn"):
+            self.assertIn(f'id="{key}"', PAGE, key)
+        self.assertIn("startVod()", PAGE)
+        self.assertIn("updateClipper()", PAGE)
+
+
+class VodTest(unittest.TestCase):
+    """Scoring and cutting a finished stream, without a live ingest."""
+
+    @staticmethod
+    def _source(tmp_path: Path, seconds: int = 8) -> Path:
+        source = tmp_path / "past.mp4"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+             "-i", f"testsrc2=size=320x240:rate=15:duration={seconds}",
+             "-f", "lavfi", "-i", f"sine=frequency=300:duration={seconds}",
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", str(source)],
+            check=True,
+        )
+        return source
+
+    def test_pick_moments_takes_one_clip_per_sustained_burst(self):
+        cfg = Config(input="x")
+        cfg.threshold, cfg.confirm, cfg.cooldown = 0.5, 2.0, 10.0
+        curve = [0.0] * 60
+        for i in range(20, 25):
+            curve[i] = 0.9          # a sustained burst
+        curve[40] = 0.95            # a single-second spike: too short to confirm
+        moments = vod_mod.pick_moments(curve, cfg)
+        self.assertEqual(len(moments), 1)
+        self.assertGreaterEqual(moments[0].t, 20.0)
+        self.assertLessEqual(moments[0].t, 24.0)
+        self.assertAlmostEqual(moments[0].score, 0.9, delta=0.01)
+
+    def test_max_clips_keeps_the_strongest_moments(self):
+        cfg = Config(input="x")
+        cfg.threshold, cfg.confirm, cfg.cooldown = 0.5, 2.0, 1.0
+        curve = [0.0] * 100
+        for start, height in ((10, 0.6), (30, 0.9), (50, 0.7)):
+            for i in range(start, start + 4):
+                curve[i] = height
+        moments = vod_mod.pick_moments(curve, cfg, max_clips=2)
+        self.assertEqual(len(moments), 2)
+        self.assertAlmostEqual(min(m.score for m in moments), 0.7, delta=0.01)
+
+    def test_build_curve_reacts_to_a_chat_and_audio_burst(self):
+        cfg = Config(input="x")
+        levels = [-50.0] * 120
+        for i in range(60, 66):
+            levels[i] = -20.0
+        chat = [(float(t), user, "LETS GO") for t in range(60, 66)
+                for user in ("a", "b", "c", "d", "e")]
+        curve = vod_mod.build_curve(levels, chat, cfg)
+        self.assertEqual(len(curve), 120)
+        self.assertGreater(max(curve[60:70]), 0.4)
+        self.assertLess(max(curve[:30]), 0.25)
+
+    def test_build_curve_is_audio_led_without_chat(self):
+        cfg = Config(input="x")
+        levels = [-50.0] * 120
+        for i in range(40, 46):
+            levels[i] = -18.0
+        curve = vod_mod.build_curve(levels, [], cfg)
+        self.assertEqual(len(curve), 120)
+        self.assertGreater(max(curve[40:50]), 0.2)
+
+    def test_resolve_vod_reads_a_local_recording(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._source(Path(tmp), seconds=4)
+            source = vod_mod.resolve_vod(str(path), Path(tmp))
+            self.assertEqual(source.kind, "file")
+            self.assertGreater(source.duration, 3.0)
+            self.assertEqual(source.url, str(path))
+
+    def test_resolve_vod_rejects_an_empty_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                vod_mod.resolve_vod("   ", Path(tmp))
+
+    def test_prepare_window_cuts_the_window_out_of_the_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            path = self._source(tmp_path, seconds=8)
+            cfg = Config(input=str(path), out_dir=tmp_path / "out",
+                         work_dir=tmp_path / "work")
+            cutter = Cutter(cfg)
+            prepared = cutter.prepare_window(path, 2.0, 5.0, "vodwin")
+            self.assertIsNotNone(prepared)
+            self.assertAlmostEqual(prepared.duration, 3.0, delta=0.4)
+            self.assertIsNone(cutter.prepare_window(path, 2.0, 2.5, "tooshort"))
+
+    def test_intermediate_encoder_flags_are_known_encoders(self):
+        from clipper.cutter import intermediate_args
+
+        self.assertIn("libx264", intermediate_args("libx264"))
+        self.assertIn("h264_videotoolbox", intermediate_args("h264_videotoolbox"))
+
+
+class VodConsoleTest(unittest.TestCase):
+    """The console's past-stream job lifecycle, without spawning a real one."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = Config(input="demo.mp4", out_dir=root / "out",
+                          work_dir=root / "work")
+        self.engine = Engine(self.cfg)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_an_empty_link_is_rejected(self):
+        result = self.engine.start_vod("   ")
+        self.assertFalse(result["ok"])
+        self.assertIn("paste a link", result["error"])
+
+    def test_only_one_past_stream_runs_at_a_time(self):
+        self.engine._vod_job = {"running": True, "state": {}}
+        result = self.engine.start_vod("https://twitch.tv/videos/1")
+        self.assertFalse(result["ok"])
+        self.assertIn("already being clipped", result["error"])
+
+    def test_stopping_when_nothing_is_running_is_reported(self):
+        self.assertFalse(self.engine.stop_vod()["ok"])
+
+    def test_snapshot_reports_the_past_stream(self):
+        self.engine._vod_job = {
+            "running": True, "link": "https://twitch.tv/videos/1", "name": "xqc",
+            "error": "", "state": {"phase": "rendering", "total": 5, "index": 2,
+                                   "clips": 1, "found": 5},
+        }
+        vod = self.engine.snapshot()["vod"]
+        self.assertTrue(vod["running"])
+        self.assertEqual(vod["phase"], "rendering")
+        self.assertEqual(vod["total"], 5)
+        self.assertEqual(vod["rendered"], 1)
+        self.assertEqual(vod["found"], 5)
+
+    def test_no_past_stream_snapshots_as_empty(self):
+        self.assertEqual(self.engine.snapshot()["vod"], {})
+
+
+class UpdateTest(unittest.TestCase):
+    """The self-updater: it must never overwrite local work."""
+
+    def test_this_checkout_is_a_git_repo(self):
+        self.assertTrue(update_mod.is_repo())
+        self.assertIn("github.com/ma35ttt/clipper", update_mod.version_line())
+
+    def test_missing_git_is_explained_not_crashed(self):
+        with mock.patch.object(update_mod.shutil, "which", return_value=None):
+            result = update_mod.check()
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["git"])
+        self.assertIn("git is not installed", result["message"])
+
+    def test_a_zip_copy_is_told_to_re_download(self):
+        with mock.patch.object(update_mod, "is_repo", return_value=False):
+            result = update_mod.check()
+        self.assertFalse(result["ok"])
+        self.assertIn("not cloned", result["message"])
+
+
+class CliTest(unittest.TestCase):
+    def test_vod_and_update_subcommands_are_wired(self):
+        from clipper.cli import build_parser
+
+        vod_args = build_parser().parse_args(["vod", "https://twitch.tv/videos/1"])
+        self.assertEqual(vod_args.func.__name__, "cmd_vod")
+        self.assertEqual(vod_args.link, "https://twitch.tv/videos/1")
+        self.assertEqual(vod_args.max_clips, 15)
+
+        upd = build_parser().parse_args(["update", "--check"])
+        self.assertEqual(upd.func.__name__, "cmd_update")
+        self.assertTrue(upd.check)
 
 
 if __name__ == "__main__":

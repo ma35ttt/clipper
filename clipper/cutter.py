@@ -310,6 +310,16 @@ def _even(value: float) -> int:
     return max(2, int(round(value)) - int(round(value)) % 2)
 
 
+def intermediate_args(encoder: str) -> list[str]:
+    """Encoder flags for a scratch clip that will be re-encoded once more."""
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                "-profile:v", "high"]
+    if encoder == "h264_videotoolbox":
+        return ["-c:v", "h264_videotoolbox", "-b:v", "14M", "-allow_sw", "1"]
+    return ["-c:v", encoder, "-b:v", "14M"]
+
+
 @dataclass(frozen=True)
 class SplitGeometry:
     cam_h: int
@@ -469,6 +479,51 @@ class Cutter:
             list_path=list_path,
             offset=begin - start,
             duration=finish - begin,
+            width=info.get("width") or 0,
+            height=info.get("height") or 0,
+            title_file=work / "title.txt",
+        )
+
+    def prepare_window(self, source: str | Path, start: float, end: float,
+                       job_id: str, log=lambda message: None) -> Prepared | None:
+        """Cut one window out of a seekable source into a normal ``Prepared``.
+
+        This is the past-stream equivalent of :meth:`prepare`: instead of
+        copying segments off the live buffer, it seeks into a VOD (or local
+        recording) and re-encodes just the chosen span. Seeking with ffmpeg
+        *while re-encoding* is frame-accurate, so the trigger second lands
+        exactly where the analysis found it, and the rest of the pipeline —
+        captions, hook, cold open, voiceover — cannot tell the difference.
+        """
+        duration = float(end) - float(start)
+        if duration < 1.0:
+            return None
+        work = self.tmp / job_id
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        media = work / "window.mp4"
+        args = [
+            FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-ss", f"{max(0.0, float(start)):.3f}", "-i", str(source),
+            "-t", f"{duration:.3f}", "-map", "0:v:0?", "-map", "0:a:0?",
+        ]
+        args += intermediate_args(self.encoder)
+        args += ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                 "-ac", "2", "-ar", "48000", "-movflags", "+faststart", str(media)]
+        result = run(args, timeout=1800)
+        if result.returncode != 0 or not media.exists():
+            detail = (result.stderr or "").strip().splitlines()
+            log("vod: could not cut the moment — "
+                + (detail[-1][:160] if detail else "ffmpeg failed"))
+            return None
+        info = probe(media)
+        listing = work / "concat.txt"
+        listing.write_text(f"file '{media.resolve().as_posix()}'\n")
+        return Prepared(
+            work=work,
+            list_path=listing,
+            offset=0.0,
+            duration=float(info.get("duration") or duration),
             width=info.get("width") or 0,
             height=info.get("height") or 0,
             title_file=work / "title.txt",

@@ -178,10 +178,67 @@ your machine only; nothing is exposed to the network.
 - **Edit & voice** — the two new toggles, described below.
 - **Add a stream** — paste a link; each streamer gets its own worker, folder and
   console.
+- **Clip a past stream** — paste a finished Twitch VOD or YouTube link and clipper
+  analyses the whole thing and cuts its best moments (see below).
+- **Update** — pull the newest version from GitHub without leaving the page.
 - **Clip wall** — play, download, copy the path, or delete each clip.
 
 Everything on the page is also a command-line flag, and per-streamer settings are
 remembered in `.clipper/profiles/<channel>.json`.
+
+---
+
+## Clipping a past stream
+
+Realtime clipping needs the stream to still be live. To mine a stream that has
+already ended, paste its link — or point `vod` at a link or a recording — and
+clipper scores the whole timeline instead of the last few minutes:
+
+```bat
+cd %USERPROFILE%\clipper
+py -3 -m clipper vod https://www.twitch.tv/videos/123456789 --out D:\clips
+```
+
+The same knobs apply: `--layout`, `--subs`, `--edit coldopen`, `--voice on`,
+`--threshold`, `--profile`, and so on. How it works:
+
+- **The link is resolved to something seekable.** A Twitch VOD becomes a direct
+  playback URL; a YouTube link or anything else goes through `yt-dlp`; a local
+  recording or `.m3u8` is used as-is.
+- **The chat is re-read from the VOD.** Twitch keeps a finished stream's chat on
+  its own timeline, so the same chat-rate novelty that fires live is rebuilt
+  offline (cached under `<work>/vod/`, so a re-run is instant).
+- **The audio is measured in one pass** — the speech band is scanned once for its
+  loudness curve, then chat and audio are fused into one hype score.
+- **Each moment is cut out and rendered normally**, one at a time, so captions,
+  hook, cold open and voiceover behave exactly as they do live.
+
+Useful extras:
+
+```bash
+--max-clips 15           # how many clips to make (default 15)
+--chat-mode off          # audio only, no chat
+-c file:chat.jsonl       # score with a recorded chat instead
+```
+
+`vod` is also a button on the console: paste a past-stream link into **Clip a
+past stream** and watch the progress bar in the panel.
+
+---
+
+## Keeping it up to date
+
+If you cloned the repo with `git`, updating is one step. On the console, press
+**Update**; from a terminal:
+
+```bash
+cd ~/clipper && python3 -m clipper update
+```
+
+On Windows you can also double-click **`update.bat`** (macOS: `update.command`).
+`clipper update --check` only reports what is waiting, without changing anything.
+The updater fast-forwards and stops if your copy has local changes, so it never
+throws work away; restart the console afterwards to load the new version.
 
 ---
 
@@ -400,7 +457,13 @@ Other useful flags:
 
 `clips` (list what was captured), `models` (what speech models are installed),
 `frame` (grab one frame, to line up `--cam`) and `doctor` (environment check) are
-also available.
+also available. `vod` clips a finished stream and `update` pulls the newest
+version:
+
+```bash
+cd ~/clipper && python3 -m clipper vod https://www.twitch.tv/videos/123456789
+cd ~/clipper && python3 -m clipper update
+```
 
 ## Profiles
 

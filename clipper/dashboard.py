@@ -24,20 +24,21 @@ PAGE = """<!doctype html>
 <style>
   :root {
     color-scheme: dark;
-    --bg: #08090d;
-    --bg2: #0d0f15;
-    --panel: #12151d;
-    --panel2: #161a24;
-    --line: rgba(255,255,255,.07);
-    --line2: rgba(255,255,255,.12);
+    --bg: #0a0c11;
+    --panel: #12151c;
+    --panel2: #171b24;
+    --line: rgba(255,255,255,.08);
+    --line2: rgba(255,255,255,.14);
     --text: #eef1f7;
-    --dim: #8a93a6;
-    --faint: #5b6373;
+    --dim: #98a1b3;
+    --faint: #667085;
     --hot: #ff3d68;
     --warm: #ffcf5c;
     --cool: #38e0b0;
     --blue: #6aa8ff;
-    --radius: 18px;
+    --radius: 16px;
+    --radius-sm: 11px;
+    --shadow: 0 12px 34px rgba(0,0,0,.35);
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -45,110 +46,105 @@ PAGE = """<!doctype html>
     margin: 0;
     color: var(--text);
     background:
-      radial-gradient(620px 460px at 8% -4%, rgba(255,61,104,.22), transparent 64%),
-      radial-gradient(580px 420px at 96% 2%, rgba(56,224,176,.15), transparent 62%),
-      radial-gradient(720px 520px at 78% 96%, rgba(106,168,255,.12), transparent 66%),
-      radial-gradient(500px 400px at 30% 58%, rgba(255,207,92,.05), transparent 70%),
-      linear-gradient(180deg, var(--bg2), var(--bg));
+      radial-gradient(900px 520px at 50% -220px, rgba(106,168,255,.10), transparent 70%),
+      var(--bg);
     background-attachment: fixed;
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
+  a { color: var(--blue); text-decoration: none; }
   header {
-    display: flex; align-items: center; gap: 12px;
-    padding: 14px clamp(16px, 4vw, 40px);
-    border-bottom: 1px solid rgba(255,255,255,.09);
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px clamp(14px, 3vw, 30px);
+    border-bottom: 1px solid var(--line);
     position: sticky; top: 0; z-index: 10;
-    background: rgba(8,9,13,.5);
-    backdrop-filter: blur(20px) saturate(150%);
-    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    background: rgba(10,12,17,.78);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
     flex-wrap: wrap;
   }
-  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-right: 2px; }
   .mark {
-    width: 30px; height: 30px; border-radius: 9px;
+    width: 28px; height: 28px; border-radius: 8px;
     background: linear-gradient(135deg, var(--hot), #ff8a5c);
-    display: grid; place-items: center; font-weight: 900; font-size: 15px;
-    color: #fff; box-shadow: 0 6px 18px rgba(255,61,104,.35);
+    display: grid; place-items: center; font-weight: 900; font-size: 14px;
+    color: #fff; box-shadow: 0 6px 16px rgba(255,61,104,.32);
   }
-  h1 { font-size: 15px; margin: 0; letter-spacing: .16em; text-transform: uppercase; font-weight: 800; }
+  h1 { font-size: 14px; margin: 0; letter-spacing: .14em; text-transform: uppercase; font-weight: 800; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--cool);
-         box-shadow: 0 0 12px var(--cool); animation: pulse 2s infinite; }
-  @keyframes pulse { 50% { opacity: .3; transform: scale(.85); } }
-  .live { display: flex; align-items: center; gap: 7px; color: var(--dim);
-          font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+         box-shadow: 0 0 10px var(--cool); animation: pulse 2s infinite; }
+  .dot.off { background: var(--hot); box-shadow: none; animation: none; }
+  @keyframes pulse { 50% { opacity: .35; transform: scale(.85); } }
+  .live { display: flex; align-items: center; gap: 6px; color: var(--dim);
+          font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; }
   .spacer { flex: 1; }
   .chip {
     border: 1px solid var(--line2); border-radius: 999px;
-    padding: 5px 11px; font-size: 11px; letter-spacing: .06em;
+    padding: 4px 10px; font-size: 11px; letter-spacing: .05em;
     color: var(--dim); text-transform: uppercase; white-space: nowrap;
   }
   .btn {
     background: linear-gradient(180deg, #ff557a, var(--hot));
-    color: #fff; border: 0; border-radius: 11px;
-    padding: 10px 16px; font-weight: 800; letter-spacing: .06em;
+    color: #fff; border: 0; border-radius: 10px;
+    padding: 9px 15px; font-weight: 800; letter-spacing: .05em;
     font-size: 12px; cursor: pointer; white-space: nowrap;
-    box-shadow: 0 8px 22px rgba(255,61,104,.32), inset 0 1px 0 rgba(255,255,255,.22);
+    box-shadow: 0 6px 16px rgba(255,61,104,.28);
     transition: transform .08s ease, box-shadow .15s ease, background .15s ease;
   }
-  .btn:hover { box-shadow: 0 10px 28px rgba(255,61,104,.45), inset 0 1px 0 rgba(255,255,255,.22); }
+  .btn:hover { box-shadow: 0 8px 22px rgba(255,61,104,.4); }
   .btn:active { transform: translateY(1px) scale(.99); }
+  .btn:disabled { opacity: .6; cursor: progress; }
   .btn.ghost {
-    background: rgba(255,255,255,.03); color: var(--text);
+    background: rgba(255,255,255,.04); color: var(--text);
     border: 1px solid var(--line2); box-shadow: none;
-    font-weight: 700; padding: 9px 14px;
+    font-weight: 700; padding: 8px 13px;
   }
-  .btn.ghost:hover { background: rgba(255,255,255,.07); box-shadow: none; }
+  .btn.ghost:hover { background: rgba(255,255,255,.08); box-shadow: none; }
   .btn.magic {
-    background: linear-gradient(180deg, rgba(106,168,255,.20), rgba(106,168,255,.08));
-    color: #cfe2ff; border: 1px solid rgba(106,168,255,.42); box-shadow: none;
-    font-weight: 800; padding: 9px 14px;
+    background: linear-gradient(180deg, rgba(106,168,255,.22), rgba(106,168,255,.10));
+    color: #d6e5ff; border: 1px solid rgba(106,168,255,.4); box-shadow: none;
+    font-weight: 800; padding: 8px 13px;
   }
   .btn.magic:hover {
-    background: linear-gradient(180deg, rgba(106,168,255,.30), rgba(106,168,255,.14));
-    border-color: rgba(106,168,255,.65); box-shadow: 0 6px 18px rgba(106,168,255,.18);
+    background: linear-gradient(180deg, rgba(106,168,255,.32), rgba(106,168,255,.16));
+    border-color: rgba(106,168,255,.7);
   }
   .btn.magic:disabled { opacity: .55; cursor: progress; }
-  .btn.rec { background: linear-gradient(180deg, #2a3040, #1c212c); color: var(--dim);
+  .btn.rec { background: rgba(255,255,255,.04); color: var(--dim);
              border: 1px solid var(--line2); box-shadow: none; }
   .btn.rec.on { background: linear-gradient(180deg, #ff557a, var(--hot)); color: #fff;
-                box-shadow: 0 0 0 2px rgba(255,61,104,.35), 0 8px 24px rgba(255,61,104,.4);
+                box-shadow: 0 0 0 2px rgba(255,61,104,.3), 0 8px 22px rgba(255,61,104,.38);
                 animation: recpulse 1.4s infinite; }
-  @keyframes recpulse { 50% { box-shadow: 0 0 0 6px rgba(255,61,104,.12), 0 8px 24px rgba(255,61,104,.35); } }
-  .btn.auto { background: linear-gradient(180deg, #2a3040, #1c212c); color: var(--dim);
+  @keyframes recpulse { 50% { box-shadow: 0 0 0 6px rgba(255,61,104,.1), 0 8px 22px rgba(255,61,104,.32); } }
+  .btn.auto { background: rgba(255,255,255,.04); color: var(--dim);
               border: 1px solid var(--line2); box-shadow: none; }
   .btn.auto.on { background: linear-gradient(180deg, #46e6b8, var(--cool)); color: #06231b;
-                 border: 0; box-shadow: 0 8px 24px rgba(56,224,176,.35); }
+                 border: 0; box-shadow: 0 8px 22px rgba(56,224,176,.32); }
   body.console .top { display: none; }
   body.console #recbtn, body.console #clipbtn { display: none; }
-  body.console #streamsec {
-    border-color: rgba(106,168,255,.32);
-    box-shadow: 0 18px 50px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.06);
-  }
-  main { max-width: 1280px; margin: 0 auto; padding: clamp(16px, 3vw, 34px);
-         display: grid; gap: clamp(14px, 2vw, 22px); }
-  .top { display: grid; grid-template-columns: 1.45fr 1fr; gap: clamp(14px, 2vw, 22px); }
+  body.console #streamsec { border-color: rgba(106,168,255,.3); }
+  main { max-width: 1240px; margin: 0 auto; padding: clamp(16px, 3vw, 30px);
+         display: grid; gap: clamp(14px, 2vw, 20px); }
+  .top { display: grid; grid-template-columns: 1.5fr 1fr; gap: clamp(14px, 2vw, 20px); }
   @media (max-width: 900px) { .top { grid-template-columns: 1fr; } }
   .panel {
-    background: linear-gradient(180deg, rgba(24,28,39,.68), rgba(16,19,27,.55));
-    border: 1px solid rgba(255,255,255,.09); border-radius: var(--radius);
-    padding: 20px;
-    backdrop-filter: blur(20px) saturate(145%);
-    -webkit-backdrop-filter: blur(20px) saturate(145%);
-    box-shadow: 0 18px 50px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.06);
+    background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px;
+    box-shadow: var(--shadow);
   }
-  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-  h2 { font-size: 11px; letter-spacing: .15em; text-transform: uppercase; color: var(--dim);
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  h2 { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim);
        margin: 0; font-weight: 700; }
-  h3 { font-size: 11px; letter-spacing: .13em; text-transform: uppercase; color: var(--warm);
+  h3 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--warm);
        margin: 0; font-weight: 700; }
   .score-row { display: flex; align-items: flex-end; gap: 14px; }
-  .big { font-size: clamp(44px, 6vw, 62px); line-height: .95; font-weight: 800;
+  .big { font-size: clamp(44px, 6vw, 60px); line-height: .95; font-weight: 800;
          font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
   .big small { font-size: .28em; color: var(--faint); font-weight: 600; letter-spacing: .02em; }
   .state { text-align: right; }
   .state .label { color: var(--faint); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
-  .state b { display: block; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; }
+  .state b { display: block; font-size: 13px; letter-spacing: .05em; text-transform: uppercase; }
   .state b.armed { color: var(--cool); }
   .state b.rec { color: var(--hot); }
   .state b.cool { color: var(--warm); }
@@ -160,27 +156,25 @@ PAGE = """<!doctype html>
   .sig { display: grid; grid-template-columns: 74px 1fr 58px; gap: 12px; align-items: center; }
   .sig b { font-weight: 600; font-size: 11px; color: var(--dim); letter-spacing: .08em; text-transform: uppercase; }
   .sig span { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--dim); }
-  .meter { height: 7px; background: rgba(255,255,255,.055); border-radius: 99px; overflow: hidden; }
+  .meter { height: 7px; background: rgba(255,255,255,.06); border-radius: 99px; overflow: hidden; }
   .meter > i { display: block; height: 100%; width: 0%; border-radius: 99px;
                background: linear-gradient(90deg, var(--blue), var(--cool));
                transition: width .16s ease; }
   .meter.hot > i { background: linear-gradient(90deg, var(--warm), var(--hot)); }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .stat { background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.07);
-          border-radius: 13px; padding: 13px 14px; }
+  .stat { background: var(--panel2); border: 1px solid var(--line);
+          border-radius: var(--radius-sm); padding: 12px 14px; }
   .stat .label { color: var(--faint); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
   .stat b { display: block; margin-top: 5px; font-size: 20px; font-weight: 700;
             font-variant-numeric: tabular-nums; }
   .stat span { color: var(--dim); font-size: 11px; }
   .meta-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
-  .meta-row .chip { font-size: 10px; padding: 4px 9px; }
+  .meta-row .chip { font-size: 10px; padding: 3px 8px; }
   .recbanner {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    background: linear-gradient(180deg, rgba(255,61,104,.16), rgba(255,61,104,.06));
-    border: 1px solid rgba(255,61,104,.4); border-radius: 14px;
-    padding: 12px 16px; font-size: 13px; font-weight: 600;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    background: rgba(255,61,104,.1);
+    border: 1px solid rgba(255,61,104,.4); border-radius: 13px;
+    padding: 11px 15px; font-size: 13px; font-weight: 600;
   }
   .recbanner.warn { border-color: var(--warm); background: rgba(255,207,92,.1); }
   .recbanner .dot { animation: none; }
@@ -188,8 +182,8 @@ PAGE = """<!doctype html>
   .recbanner .hint { color: var(--dim); font-weight: 400; font-size: 12px; }
   .settings-tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
   .settings { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
-  .group { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.07);
-           border-radius: 14px; padding: 14px 16px; }
+  .group { background: var(--panel2); border: 1px solid var(--line);
+           border-radius: 13px; padding: 14px 16px; }
   .group-head { margin-bottom: 12px; }
   .fields { display: grid; gap: 13px; }
   .field { display: grid; gap: 5px; }
@@ -212,14 +206,14 @@ PAGE = """<!doctype html>
   .log {
     font: 11.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--dim); white-space: pre-wrap; max-height: 220px; overflow: auto;
-    background: rgba(6,8,12,.55); border: 1px solid rgba(255,255,255,.07);
+    background: rgba(6,8,12,.55); border: 1px solid var(--line);
     border-radius: 12px; padding: 12px 14px; margin: 0;
   }
   .wall-head { display: flex; align-items: baseline; justify-content: space-between; margin: 2px 2px 0; }
   .wall-head .count { color: var(--dim); font-size: 12px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-top: 12px; }
-  .clip { background: linear-gradient(180deg, rgba(24,28,39,.64), rgba(16,19,27,.52));
-          border: 1px solid rgba(255,255,255,.08); border-radius: 16px; overflow: hidden;
+  .clip { background: var(--panel);
+          border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
           transition: border-color .18s ease, transform .18s ease; }
   .clip:hover { border-color: var(--line2); transform: translateY(-2px); }
   .clip video { width: 100%; aspect-ratio: 9 / 16; background: #000; display: block; object-fit: contain; }
@@ -239,16 +233,16 @@ PAGE = """<!doctype html>
   }
   .iconbtn:hover { color: var(--text); background: rgba(255,255,255,.08); }
   .iconbtn.danger:hover { color: #fff; background: rgba(255,61,104,.35); border-color: var(--hot); }
-  .empty { color: var(--dim); border: 1px dashed var(--line2); border-radius: 16px;
-           padding: 42px; text-align: center; background: rgba(255,255,255,.02); }
+  .empty { color: var(--dim); border: 1px dashed var(--line2); border-radius: 14px;
+           padding: 40px; text-align: center; background: rgba(255,255,255,.02); }
+  .empty.small { padding: 18px; font-size: 12.5px; }
   .capturing { border-color: rgba(255,61,104,.5); box-shadow: 0 0 0 1px rgba(255,61,104,.3),
-               0 18px 50px rgba(255,61,104,.15); }
+               0 18px 44px rgba(255,61,104,.14); }
   #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 50;
             display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
-  .toast { background: rgba(23,27,37,.82); border: 1px solid var(--line2); border-left: 3px solid var(--cool);
+  .toast { background: rgba(23,27,37,.9); border: 1px solid var(--line2); border-left: 3px solid var(--cool);
            color: var(--text); padding: 9px 14px; border-radius: 10px; font-size: 12.5px;
            box-shadow: 0 12px 30px rgba(0,0,0,.45); max-width: 340px;
-           backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
            animation: toastin .16s ease; }
   .toast.bad { border-left-color: var(--hot); }
   @keyframes toastin { from { opacity: 0; transform: translateY(6px); } }
@@ -267,8 +261,8 @@ PAGE = """<!doctype html>
   .streams { display: grid; gap: 8px; margin-top: 14px; }
   .streamrow {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 9px 12px; border: 1px solid rgba(255,255,255,.07); border-radius: 12px;
-    background: rgba(255,255,255,.03);
+    padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel2);
   }
   .streamrow b { font-size: 13px; letter-spacing: .01em; }
   .streamrow .smeta { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -276,20 +270,36 @@ PAGE = """<!doctype html>
   .streamrow .chip { font-size: 9.5px; padding: 3px 8px; }
   .streamrow .st-error { color: var(--warm); font-size: 11.5px; max-width: 100%;
                          overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dot.off { background: var(--hot); box-shadow: none; animation: none; }
-  .empty.small { padding: 18px; font-size: 12.5px; }
+  .vodcard { margin-top: 14px; border: 1px solid var(--line); border-radius: 13px;
+             padding: 14px 16px; background: var(--panel2); }
+  .vodcard .vhead { display: flex; align-items: center; gap: 9px; margin-bottom: 11px; }
+  .vodcard .vrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .vodcard input[type=text] {
+    flex: 1 1 320px; min-width: 0; background: rgba(8,10,15,.55);
+    border: 1px solid var(--line2); color: var(--text); border-radius: 10px;
+    padding: 9px 12px; font-size: 13px;
+  }
+  .vodcard input:focus { outline: none; border-color: var(--blue);
+                         box-shadow: 0 0 0 2px rgba(106,168,255,.18); }
+  .vodcard .vnote { color: var(--faint); font-size: 11.5px; margin-top: 10px; line-height: 1.4; }
+  .vodbar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.07);
+            overflow: hidden; margin-top: 11px; }
+  .vodbar > i { display: block; height: 100%; width: 0%; border-radius: 99px;
+                background: linear-gradient(90deg, var(--blue), var(--cool));
+                transition: width .3s ease; }
+  .vodstatus { display: flex; justify-content: space-between; gap: 10px;
+               color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .vodstatus b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
   .modal-backdrop {
     position: fixed; inset: 0; z-index: 60; display: grid; place-items: center;
-    padding: 20px; background: rgba(4,5,8,.6);
+    padding: 20px; background: rgba(4,5,8,.64);
     backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   }
   .modal {
-    width: 100%; max-width: 460px; border-radius: 18px; padding: 22px;
-    border: 1px solid rgba(255,255,255,.12);
-    background: linear-gradient(180deg, rgba(26,30,42,.86), rgba(17,20,28,.82));
-    backdrop-filter: blur(26px) saturate(150%);
-    -webkit-backdrop-filter: blur(26px) saturate(150%);
-    box-shadow: 0 30px 80px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.07);
+    width: 100%; max-width: 460px; border-radius: 16px; padding: 22px;
+    border: 1px solid var(--line2);
+    background: var(--panel2);
+    box-shadow: 0 30px 80px rgba(0,0,0,.6);
   }
   .modal h3 { margin-bottom: 9px; }
   .modal p { color: var(--dim); font-size: 13px; margin: 0 0 9px; }
@@ -306,6 +316,7 @@ PAGE = """<!doctype html>
   <span class="chip" id="chan">—</span>
   <span class="spacer"></span>
   <span class="chip" id="uptime">0h 00m</span>
+  <button class="btn ghost" id="updbtn" onclick="updateClipper()" title="pull the newest version from GitHub">Update</button>
   <button class="btn auto" id="autobtn" onclick="toggleAuto()" title="Configure everything: 9:16 frame, webcam follow, synced captions, smart hook (a)">★ AUTO</button>
   <button class="btn rec" id="recbtn" onclick="toggleRec()" title="Start / stop a manual recording (r)">● REC</button>
   <button class="btn" id="clipbtn" onclick="snap()" title="Force a clip at this moment (c)">CLIP NOW</button>
@@ -383,6 +394,19 @@ PAGE = """<!doctype html>
       <button class="btn" type="submit" id="addbtn">Add stream</button>
     </form>
     <div class="streams" id="streams"><div class="empty small">only this stream is clipping</div></div>
+    <div class="vodcard" id="vodcard">
+      <div class="vhead"><h3>clip a past stream</h3><span class="chip" id="vodchip">vod</span></div>
+      <div class="vrow">
+        <input type="text" id="vodinput" spellcheck="false" autocomplete="off"
+               aria-label="past stream link"
+               placeholder="https://twitch.tv/videos/123456789  ·  https://youtu.be/...">
+        <button class="btn magic" id="vodbtn" onclick="startVod()"
+                title="find the best moments in a finished stream and cut clips from it">Clip past stream</button>
+      </div>
+      <div class="vnote" id="vodnote">Analyses a finished Twitch VOD, YouTube video or local recording and cuts its strongest moments — the same frame, captions and hook as live.</div>
+      <div class="vodbar hidden" id="vodbar"><i id="vodfill"></i></div>
+      <div class="vodstatus hidden" id="vodstatus"><span id="vodphase">starting…</span><b id="vodcount"></b></div>
+    </div>
   </section>
   <section class="panel">
     <div class="panel-head">
@@ -569,6 +593,81 @@ function copyPath(file) {
 function copyFolder(path) {
   copyText(path);
 }
+
+/* -- updating ------------------------------------------------------- */
+async function updateClipper() {
+  const btn = $('updbtn');
+  btn.disabled = true; btn.textContent = 'Checking...';
+  const r = await postJSON('/api/update', {action: 'apply'});
+  btn.disabled = false;
+  if (!r) { btn.textContent = 'Update'; return; }
+  btn.textContent = r.updated ? 'Restart to apply' : 'Update';
+  if (r.ok === false) return toast(r.message || r.error || 'update failed', true);
+  toast(r.message || 'up to date');
+}
+
+/* -- past streams (the VOD section) --------------------------------- */
+async function startVod() {
+  const input = $('vodinput');
+  const link = input.value.trim();
+  if (!link) { toast('paste a link to a past stream first', true); return; }
+  const btn = $('vodbtn');
+  btn.disabled = true; btn.textContent = 'Starting...';
+  const r = await postJSON('/api/vod', {url: link, name: $('nameinput').value.trim()});
+  btn.disabled = false; btn.textContent = 'Clip past stream';
+  if (!r) return;
+  if (r.ok === false) return toast(r.error || 'could not start', true);
+  input.value = '';
+  toast('analysing the past stream — watch the activity log');
+}
+
+async function stopVod() {
+  const r = await postJSON('/api/vod/stop', {});
+  if (!r) return;
+  if (r.ok === false) return toast(r.error || 'nothing to stop', true);
+  toast(r.note || 'stopping');
+}
+
+const VOD_PHASE = {
+  starting: 'starting', resolving: 'resolving the link', chat: 'reading the chat',
+  analysing: 'measuring the audio', rendering: 'rendering clips',
+  done: 'finished', error: 'failed',
+};
+
+function renderVod(v) {
+  const bar = $('vodbar'), status = $('vodstatus'), phase = $('vodphase');
+  const count = $('vodcount'), note = $('vodnote'), chip = $('vodchip');
+  if (!v || (!v.running && !v.phase)) {
+    bar.classList.add('hidden'); status.classList.add('hidden');
+    chip.textContent = 'vod'; chip.style.color = '';
+    return;
+  }
+  bar.classList.remove('hidden'); status.classList.remove('hidden');
+  const total = v.total || 0, done = v.rendered || 0;
+  $('vodfill').style.width = total ? pct(Math.min(1, done / total))
+    : (v.running ? '35%' : '100%');
+  const label = VOD_PHASE[v.phase] || v.phase || 'working';
+  phase.textContent = (v.name ? v.name + ' · ' : '') + label + (v.running ? '…' : '');
+  count.textContent = total ? done + ' / ' + total + ' clips'
+    : (v.found ? v.found + ' moment' + (v.found === 1 ? '' : 's') : '');
+  if (v.running) {
+    chip.textContent = total ? 'rendering' : 'analysing';
+    chip.style.color = 'var(--blue)';
+  } else if (v.error) {
+    chip.textContent = 'failed'; chip.style.color = 'var(--hot)';
+  } else {
+    chip.textContent = 'done'; chip.style.color = 'var(--cool)';
+  }
+  if (v.error) {
+    note.textContent = 'error: ' + v.error;
+    note.style.color = 'var(--hot)';
+  } else {
+    note.textContent = 'Analyses a finished Twitch VOD, YouTube video or local recording '
+      + 'and cuts its strongest moments — the same frame, captions and hook as live.';
+    note.style.color = '';
+  }
+}
+
 
 /* -- extra streams (the link section) ------------------------------- */
 let pendingStream = null;
@@ -859,6 +958,7 @@ async function tick() {
     setAuto(!!s.auto);
     renderRec(s);
     renderStreams(s);
+    renderVod(s.vod);
     renderLog(s.log);
     history.push(s.score || 0);
     if (history.length > MAXH) history.shift();
@@ -1015,6 +1115,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json(engine.stop_stream(str(body.get("name") or "")))
             if path == "/api/streams/retry":
                 return self._json(engine.retry_stream(str(body.get("name") or "")))
+            if path == "/api/vod":
+                try:
+                    max_clips = int(body.get("max_clips") or 15)
+                except (TypeError, ValueError):
+                    max_clips = 15
+                return self._json(engine.start_vod(
+                    str(body.get("url") or body.get("link") or ""),
+                    str(body.get("name") or ""),
+                    max(1, min(max_clips, 60)),
+                    str(body.get("chat_mode") or "auto"),
+                ))
+            if path == "/api/vod/stop":
+                return self._json(engine.stop_vod())
+            if path == "/api/update":
+                action = str(body.get("action") or "check")
+                return self._json(engine.run_update() if action == "apply"
+                                  else engine.check_update())
         except Exception as exc:  # noqa: BLE001 - a bad request must not kill the console
             return self._json({"ok": False, "error": str(exc)}, status=500)
         self.send_error(404)

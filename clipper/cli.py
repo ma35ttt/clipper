@@ -175,6 +175,23 @@ def cmd_run(args: argparse.Namespace) -> int:
         raise
 
 
+def cmd_vod(args: argparse.Namespace) -> int:
+    """Clip a stream that has already ended."""
+    from . import vod as vod_mod
+
+    # ``vod`` takes the link positionally and has no --input, so hand the link
+    # to the shared config builder as the source of record.
+    args.input = args.link
+    cfg = _config_from_args(args)
+    cfg.dashboard = False          # a batch job serves no page
+    if args.json:
+        print(json.dumps(cfg.as_dict(), indent=2))
+        return 0
+    print(BANNER)
+    return vod_mod.run(cfg, args.link, max_clips=args.max_clips,
+                       chat_mode=args.chat_mode)
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     """Console-only mode: no stream until a link is pasted into the page."""
     from .engine import Engine
@@ -324,6 +341,21 @@ def _forward_args(args: argparse.Namespace) -> list[str]:
     if getattr(args, "no_profile", False):
         out.append("--no-profile")
     return out
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Pull the newest commits, or say clearly why it cannot."""
+    from . import update as update_mod
+
+    action = "check" if args.check else "update"
+    print(f"  clipper {__version__}  ({update_mod.ROOT})")
+    result = update_mod.check() if args.check else update_mod.run(
+        log=lambda message: print(f"  {message}"))
+    marker = "✓" if result["ok"] else "✗"
+    print(f"  {marker} {result['message'] or action}")
+    if result.get("updated") and result.get("restart"):
+        print("  restart the console (or the run) to load it")
+    return 0 if result["ok"] else 1
 
 
 def cmd_pack(args: argparse.Namespace) -> int:
@@ -541,6 +573,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="open the console in your browser once it is listening")
     p_dash.set_defaults(func=cmd_dashboard, console=True)
 
+    p_vod = sub.add_parser("vod", aliases=["past"],
+                           help="clip a stream that has already ended (a VOD or a file)")
+    _add_run_args(p_vod, include_source=False)
+    p_vod.add_argument("link",
+                       help="twitch.tv/videos/... , a YouTube link, a local recording, "
+                            "or a .m3u8 URL")
+    p_vod.add_argument("-c", "--chat",
+                       help="file:<chat.jsonl> to score with instead of the VOD's chat")
+    p_vod.add_argument("--max-clips", type=int, default=15,
+                       help="make at most this many clips (default: 15)")
+    p_vod.add_argument("--chat-mode", choices=("auto", "on", "off"), default="auto",
+                       help="read the VOD's own chat for scoring (default: auto)")
+    p_vod.add_argument("--name", help="display/profile name (defaults to the channel)")
+    p_vod.set_defaults(func=cmd_vod)
+
     p_frame = sub.add_parser("frame", help="grab a frame so you can line up --cam")
     p_frame.add_argument("-i", "--input", required=True, help="stream URL or file")
     p_frame.add_argument("--cam", default="auto",
@@ -567,6 +614,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("--channel", default="",
                         help="channel name to use when a sidecar has none")
     p_pack.set_defaults(func=cmd_pack)
+
+    p_update = sub.add_parser("update", help="pull the newest version from GitHub")
+    p_update.add_argument("--check", action="store_true",
+                          help="only report whether an update is waiting")
+    p_update.set_defaults(func=cmd_update)
 
     p_models = sub.add_parser("models", help="check or fetch subtitle models")
     p_models.add_argument("--get", metavar="NAME",
